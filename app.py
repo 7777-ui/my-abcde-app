@@ -6,7 +6,7 @@ import requests
 import time
 
 # --- 1. 設置網頁標題與密碼鎖 ---
-st.set_page_config(page_title="🏹 ABCDE 戰情室", layout="wide")
+st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", layout="wide")
 
 def check_password():
     if "password_correct" not in st.session_state:
@@ -17,7 +17,7 @@ def check_password():
     st.title("🔒 私人戰情室登入")
     pwd = st.text_input("請輸入密碼", type="password")
     if st.button("確認登入"):
-        if pwd == "test0403": # <--- 密碼可以在這修改
+        if pwd == "test0403":
             st.session_state.password_correct = True
             st.rerun()
         else:
@@ -61,10 +61,6 @@ def get_market_status():
                 time.sleep(1)
                 df = yf.download(sym, period="2mo", interval="1d", progress=False)
             
-            if df.empty or len(df) < 20:
-                status[name] = {"燈號": "⚪ 資料不足", "價格": 0.0, "帶寬": 0.0}
-                continue
-
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
@@ -85,25 +81,31 @@ def get_market_status():
             status[name] = {"燈號": light, "價格": price, "帶寬": bw}
         except:
             status[name] = {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0}
-            
     return status
 
-# --- 4. 介面執行 ---
-st.title("🏹 私密戰情室：ABCDE 策略判定")
+# --- 4. 介面執行與視覺美化 ---
+st.title("🏹 私密戰情室：姊布林ABCDE 策略判定")
 m_env = get_market_status()
 
-col1, col2 = st.columns(2)
-with col1: 
-    val = m_env.get('上市', {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0})
-    # 將數字放在標題旁：加權指數 (22,345.67)
-    label_text = f"加權指數 ({val['價格']:,.2f})" if val['價格'] > 0 else "加權指數"
-    st.metric(label_text, val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+# 自定義顯示組件 (解決字體大小不一問題)
+def draw_market_card(title, data):
+    price_str = f"{data['價格']:,.2f}" if data['價格'] > 0 else "---"
+    bw_str = f"{data['帶寬']:.2%}"
+    st.markdown(f"""
+        <div style="background-color: #1E1E1E; padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50;">
+            <p style="color: #AAAAAA; font-size: 24px; margin-bottom: 5px;">{title} ({price_str})</p>
+            <p style="color: white; font-size: 42px; font-weight: bold; margin: 0;">{data['燈號']}</p>
+            <p style="color: #4CAF50; font-size: 22px; margin-top: 10px;">↑ 帶寬: {bw_str}</p>
+        </div>
+    """, unsafe_allow_html=True)
 
-with col2: 
-    val = m_env.get('上櫃', {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0})
-    # 將數字放在標題旁：OTC 指數 (267.89)
-    label_text = f"OTC 指數 ({val['價格']:,.2f})" if val['價格'] > 0 else "OTC 指數"
-    st.metric(label_text, val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+col1, col2 = st.columns(2)
+with col1:
+    draw_market_card("加權指數", m_env.get('上市', {"燈號": "偵測中", "價格": 0.0, "帶寬": 0.0}))
+with col2:
+    draw_market_card("OTC 指數", m_env.get('上櫃', {"燈號": "偵測中", "價格": 0.0, "帶寬": 0.0}))
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請貼入三竹股池資料", height=200)
