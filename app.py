@@ -10,7 +10,7 @@ import base64
 # --- 1. 設置網頁配置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-# --- 2. 背景與表格視覺優化 ---
+# --- 2. 核心 CSS 優化 (包含凍結窗格與背景設定) ---
 def set_bg_fixed(image_file):
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
@@ -18,6 +18,7 @@ def set_bg_fixed(image_file):
         b64_encoded = base64.b64encode(img_data).decode()
         style = f"""
         <style>
+        /* 背景設定 */
         .stApp {{
             background-image: url("data:image/png;base64,{b64_encoded}");
             background-attachment: fixed;
@@ -30,19 +31,25 @@ def set_bg_fixed(image_file):
             content: "";
             position: absolute;
             top: 0; left: 0; width: 100%; height: 100%;
-            background-color: rgba(0, 0, 0, 0.65); 
+            background-color: rgba(0, 0, 0, 0.75); 
             z-index: -1;
         }}
-        
-        /* 表格深色底色優化：讓字體更直覺清晰 */
-        .stTable {{
-            background-color: rgba(20, 20, 20, 0.85) !important;
-            border-radius: 10px;
+
+        /* 凍結窗格：固定大盤數據在頂部 */
+        [data-testid="stVerticalBlock"] > div:nth-child(2) {{
+            position: sticky;
+            top: 0rem;
+            z-index: 999;
+            background-color: rgba(14, 17, 23, 0.9);
             padding: 10px;
+            border-bottom: 2px solid #4CAF50;
         }}
-        .stTable td, .stTable th {{
-            color: white !important;
-            font-size: 16px !important;
+
+        /* 表格視覺優化 */
+        .stDataFrame {{
+            background-color: rgba(20, 20, 20, 0.9) !important;
+            border-radius: 10px;
+            border: 1px solid #444;
         }}
         
         header {{ visibility: hidden; }}
@@ -68,30 +75,8 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 4. 名稱抓取校正 (增加錯誤處理與清理) ---
-@st.cache_data
-def get_stock_names():
-    res = {}
-    urls = [
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=2", # 上市
-        "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"  # 上櫃
-    ]
-    for url in urls:
-        try:
-            response = requests.get(url, timeout=10)
-            dfs = pd.read_html(response.text)
-            df = dfs[0]
-            for val in df.iloc[:, 0]:
-                parts = str(val).split('\u3000')
-                if len(parts) >= 2:
-                    res[parts[0].strip()] = parts[1].strip()
-        except:
-            continue
-    return res
-
-stock_names = get_stock_names()
-
-# --- 5. 大盤偵測 ---
+# --- 4. 大盤環境偵測 ---
+@st.cache_data(ttl=300)
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
@@ -105,6 +90,7 @@ def get_market_status():
             df['BW'] = (df['STD'] * 4) / df['20MA']
             curr = df.iloc[-1]
             p, m5, m20, bw = float(curr['Close']), float(curr['5MA']), float(curr['20MA']), float(curr['BW'])
+            
             if p > m5: light = "🟢 綠燈"
             elif p > m20: light = "🟡 黃燈"
             else: light = "🔴 紅燈"
@@ -112,33 +98,44 @@ def get_market_status():
         except: status[name] = {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0}
     return status
 
-# --- 6. 介面與掃描 ---
+# --- 5. 介面佈局 ---
 st.title("🏹 私密戰情室：姊布林ABCDE 策略判定")
 m_env = get_market_status()
 
-c1, c2 = st.columns(2)
-with c1:
-    d = m_env.get('上市')
-    st.metric(f"加權指數 ({d['價格']:,.2f})", d['燈號'], f"帶寬: {d['帶寬']:.2%}")
-with c2:
-    d = m_env.get('上櫃')
-    st.metric(f"OTC 指數 ({d['價格']:,.2f})", d['燈號'], f"帶寬: {d['帶寬']:.2%}")
+# 頂部固定區域 (大盤資訊)
+m_col1, m_col2 = st.columns(2)
+with m_col1:
+    d1 = m_env.get('上市')
+    st.metric(f"加權指數 ({d1['價格']:,.2f})", d1['燈號'], f"帶寬: {d1['帶寬']:.2%}")
+with m_col2:
+    d2 = m_env.get('上櫃')
+    st.metric(f"OTC 指數 ({d2['價格']:,.2f})", d2['燈號'], f"帶寬: {d2['帶寬']:.2%}")
 
+# --- 6. 側邊欄輸入 ---
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請輸入股票代碼", height=200)
 
 if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
-    with st.spinner("戰情分析中..."):
+    
+    with st.spinner("正在抓取個股名稱與分析..."):
         for code in codes:
-            # 優先嘗試上市 (.TW)，失敗則試上櫃 (.TWO)
+            # 抓取名稱邏輯：使用 yf.Ticker 直接獲取，最準確
+            tk = yf.Ticker(f"{code}.TW")
+            name = tk.info.get('shortName', tk.info.get('longName', "未知"))
+            
             df = yf.download(f"{code}.TW", period="2mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 20:
+                tk = yf.Ticker(f"{code}.TWO")
+                name = tk.info.get('shortName', tk.info.get('longName', "未知"))
                 df = yf.download(f"{code}.TWO", period="2mo", progress=False)
                 m_type = "上櫃"
             
+            # 清理名稱中的代碼 (例如 "2330 台積電" -> "台積電")
+            name = name.replace(code, "").strip()
+
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 
@@ -173,16 +170,22 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                         strategy = "🌊【C：瘋狗浪】" if "🟢 綠燈" in env['燈號'] else "⚠️ C受限(需綠燈)"
 
                 results.append({
-                    "代碼": code, 
-                    "名稱": stock_names.get(code, "未知"),
-                    "判定": strategy, 
-                    "個股帶寬": f"{bw:.2%}", 
-                    "漲幅": f"{chg:.2%}", 
-                    "成交值": f"{vol_amt:.1f}億", 
-                    "比值": f"{ratio:.2f}"
+                    "代碼": code, "名稱": name, "判定": strategy, 
+                    "個股帶寬": round(bw*100, 2), "漲幅%": round(chg*100, 2), 
+                    "成交值(億)": round(vol_amt, 1), "比值": round(ratio, 2)
                 })
         
         if results:
-            st.table(pd.DataFrame(results))
+            final_df = pd.DataFrame(results)
+            # 使用 st.dataframe 代替 st.table 以獲得原生篩選與排序功能
+            st.dataframe(
+                final_df, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "個股帶寬": st.column_config.NumberColumn(format="%.2f%%"),
+                    "漲幅%": st.column_config.NumberColumn(format="%.2f%%"),
+                }
+            )
         else:
             st.warning("查無標的資料")
