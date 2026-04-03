@@ -60,8 +60,18 @@ def get_market_status():
         df['20MA'] = df['Close'].rolling(20).mean()
         df['STD'] = df['Close'].rolling(20).std()
         df['BW'] = (df['STD'] * 4) / df['20MA']
-        curr = df.iloc[-1]
-        price = float(curr['Close'])
+        if not df.empty:
+            curr = df.iloc[-1]
+            price = float(curr['Close'])
+            # 這裡確保 MA 也能抓到最後一筆
+            ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
+            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+        else:
+            # 如果剛好沒開盤抓不到資料，就用 Ticker 抓最後收盤價補位
+            ticker_data = yf.Ticker(index_symbol).info
+            price = ticker_data.get('regularMarketPrice') or ticker_data.get('previousClose')
+            ma5 = price
+            ma20 = price
         m5, m20 = float(curr['5MA']), float(curr['20MA'])
         light = "🟢 綠燈" if price > m5 else ("🟡 黃燈" if m5 >= price > m20 else "🔴 紅燈")
         status[name] = {"燈號": light, "帶寬": float(curr['BW']), "門檻": 0.145 if name == "上市" else 0.095}
