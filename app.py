@@ -1,104 +1,183 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import re
+import requests
+from datetime import datetime
+import os
+import base64
 
-# --- 核心策略函式 ---
-def check_strategy(stock_df, market_status, mkt_bw, otc_bw):
-    if len(stock_df) < 21: return "資料不足", 0
-    
-    # 計算技術指標
-    df = stock_df.copy()
-    bb = ta.bbands(df['Close'], length=20, std=2)
-    df['ma20'] = ta.sma(df['Close'], length=20)
-    df['ma5'] = ta.sma(df['Close'], length=5)
-    df['bw'] = (bb['BBU_20_2.0'] - bb['BBL_20_2.0']) / df['ma20'] * 100
-    
-    # 取得最新數據
-    curr = df.iloc[-1]
-    prev_ma20 = df['ma20'].iloc[-2]
-    
-    # 基礎濾網 (通用條件)
-    slope_positive = curr['ma20'] > prev_ma20
-    high_volume = (curr['Close'] * curr['Volume']) > 500000000 # 成交值 > 5億
-    pct_chg = (curr['Close'] / df['Close'].iloc[-2] - 1) * 100
-    price_above_up = curr['Close'] > bb['BBU_20_2.0'].iloc[-1] # 突破上軌
-    
-    bw = curr['bw']
-    bw_ratio = 0
-    if mkt_bw > 0: bw_ratio = bw / mkt_bw
-    
-    if not (slope_positive and high_volume and price_above_up):
-        return "未達准入", bw
+# --- 1. 網頁配置與隱藏所有平台雜訊 (完整保留) ---
+st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-    # 策略判定邏輯
-    res = "未達准入"
-    
-    # 策略 D/E 環境條件
-    env_de = (mkt_bw > 14.5 or otc_bw > 9.5) and bw > 20
-    
-    if env_de and (0.8 <= bw_ratio <= 1.2):
-        if 3 <= pct_chg <= 5: res = "【D：動能同步】"
-    elif env_de and (1.2 < bw_ratio <= 2.0):
-        if 3 <= pct_chg <= 7: res = "【E：超額擴張】"
-    elif 5 <= bw <= 10:
-        if 3 <= pct_chg <= 7: res = "【A：潛龍爆發】"
-    elif 10 < bw <= 20:
-        if 3 <= pct_chg <= 5: res = "【B：海巡狙擊】"
-    elif 20 < bw <= 40:
-        if 3 <= pct_chg <= 7: res = "【C：瘋狗浪】"
+def set_ui_cleanup(image_file):
+    b64_encoded = ""
+    if os.path.exists(image_file):
+        with open(image_file, "rb") as f:
+            b64_encoded = base64.b64encode(f.read()).decode()
+            
+    style = f"""
+    <style>
+    .stApp {{
+        background-image: url("data:image/jpeg;base64,{b64_encoded}");
+        background-attachment: fixed;
+        background-size: cover;
+        background-position: center;
+    }}
+    .stApp::before {{
+        content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background-color: rgba(0, 0, 0, 0.7); z-index: -1;
+    }}
+    [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], 
+    footer, header, #MainMenu {{
+        display: none !important; visibility: hidden !important; height: 0 !important; width: 0 !important;
+    }}
+    div[data-testid="stHorizontalBlock"] {{
+        position: sticky; top: 0px; z-index: 1000;
+        background-color: rgba(30, 30, 30, 0.6); padding: 15px; border-radius: 12px;
+        backdrop-filter: blur(10px);
+    }}
+    .stDataFrame, .stTable {{ background-color: rgba(20, 20, 20, 0.8) !important; border-radius: 10px; }}
+    </style>
+    """
+    st.markdown(style, unsafe_allow_html=True)
 
-    # 燈號准入過濾
-    if market_status == "🔴 紅燈" and "A" not in res: return "🔴 受限(需A策略)", bw
-    if market_status == "🟡 黃燈" and not any(x in res for x in ["A", "B"]): return "🟡 受限(需A/B)", bw
-    
-    return res, bw
+# 這裡路徑請確保與您的檔案一致 (您上次給的是 .png，此處對應)
+set_ui_cleanup("header_image.png")
 
-# --- 介面呈現 ---
-st.title("姊布林ABCDE 策略戰情室")
+# --- 2. 🔐 密碼鎖 (完整保留) ---
+if "password_correct" not in st.session_state:
+    st.session_state.password_correct = False
 
-# 1. 取得大盤數據判定燈號
-@st.cache_data(ttl=3600)
-def get_market_info():
-    mkt = yf.download("^TWII", period="1mo", interval="1d")
-    otc = yf.download("^TWO", period="1mo", interval="1d")
-    # 此處簡化邏輯以符合您的燈號描述
-    # 實際運算應包含 BW, 5MA, 20MA
-    return mkt, otc
+if not st.session_state.password_correct:
+    st.markdown("## 🔒 私人戰情室登入")
+    pwd = st.text_input("請輸入密碼", type="password")
+    if st.button("確認登入"):
+        if pwd == "test0403":
+            st.session_state.password_correct = True
+            st.rerun()
+        else: st.error("密碼錯誤")
+    st.stop()
 
-mkt_data, otc_data = get_market_info()
+# --- 3. 🛡️ 官方台股名稱抓取 (修正：徹底解決名稱顯示) ---
+@st.cache_data(ttl=86400)
+def get_tw_official_names():
+    mapping = {}
+    try:
+        for mode in ["2", "4"]:
+            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
+            r = requests.get(url, timeout=10)
+            df = pd.read_html(r.text)[0]
+            for item in df.iloc[:, 0]:
+                parts = str(item).split('\u3000') 
+                if len(parts) >= 2:
+                    mapping[parts[0].strip()] = parts[1].strip()
+    except: pass
+    return mapping
 
-# 2. 側邊欄：輸入股票代碼
-with st.sidebar:
-    st.header("⚙️ 設定區")
-    input_codes = st.text_area("請輸入股票代碼 (每行一個)", value="2330\n2317").split('\n')
+stock_name_map = get_tw_official_names()
 
-if st.button("🚀 開始掃描戰情"):
+# --- 4. 大盤環境偵測 ---
+@st.cache_data(ttl=300)
+def get_market_env():
+    res = {}
+    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
+    for k, v in indices.items():
+        try:
+            df = yf.download(v, period="3mo", progress=False)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            c = df['Close'].iloc[-1]
+            m5 = df['Close'].rolling(5).mean().iloc[-1]
+            m20 = df['Close'].rolling(20).mean().iloc[-1]
+            bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / m20
+            if c > m5: light = "🟢 綠燈"
+            elif c > m20: light = "🟡 黃燈"
+            else: light = "🔴 紅燈"
+            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
+        except: res[k] = {"燈號": "⚠️", "價格": 0, "帶寬": 0}
+    return res
+
+m_env = get_market_env()
+
+# --- 5. 主畫面與策略判定 (嚴格校對 A-E 邏輯) ---
+st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
+m_col1, m_col2 = st.columns(2)
+with m_col1:
+    st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
+with m_col2:
+    st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+
+st.write(f"📅 **數據掃描時間：{datetime.now().strftime('%Y/%m/%d %H:%M')}**")
+
+st.sidebar.title("🛠️ 設定區")
+raw_input = st.sidebar.text_area("請輸入股票代碼", height=250)
+
+if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
+    codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
-    # 預設市場狀態 (範例：需對接實際指數計算)
-    market_status = "🟡 黃燈" 
-    mkt_bw, otc_bw = 10.5, 8.2 
-
-    for code in input_codes:
-        code = code.strip()
-        if not code: continue
-        
-        # 修正名稱顯示問題
-        ticker_id = f"{code}.TW"
-        t = yf.Ticker(ticker_id)
-        # 優先抓取 shortName 或 longName
-        info = t.info
-        name = info.get('shortName') or info.get('longName') or info.get('symbol') or "未知"
-        
-        hist = t.history(period="2mo")
-        status, bw = check_strategy(hist, market_status, mkt_bw, otc_bw)
-        
-        results.append({
-            "股票代碼": code,
-            "台股名稱": name, # 修正後的名稱欄位
-            "判定結果": status,
-            "個股帶寬%": f"{bw:.2f}%",
-            "今日漲幅%": f"{(hist['Close'].pct_change().iloc[-1]*100):.2f}%" if not hist.empty else "0%"
-        })
     
-    st.table(pd.DataFrame(results))
+    with st.spinner("策略分析中..."):
+        for code in codes:
+            official_name = stock_name_map.get(code)
+            
+            # 下載數據
+            df = yf.download(f"{code}.TW", period="3mo", progress=False)
+            m_type = "上市"
+            if df.empty or len(df) < 20:
+                df = yf.download(f"{code}.TWO", period="3mo", progress=False)
+                m_type = "上櫃"
+            
+            # 若官方表沒抓到，嘗試從 Ticker 抓取
+            if not official_name:
+                try:
+                    tk = yf.Ticker(f"{code}.TW" if m_type == "上市" else f"{code}.TWO")
+                    official_name = re.sub(r'[A-Za-z\s]+', '', tk.info.get('shortName', '未知'))
+                except: official_name = "未知"
+
+            if not df.empty and len(df) >= 20:
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                env = m_env[m_type]
+                
+                # 計算指標
+                df['20MA'] = df['Close'].rolling(20).mean()
+                df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
+                p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / df['20MA'].iloc[-1]
+                chg = (p_curr - p_yest) / p_yest
+                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
+                ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
+                slope_pos = df['20MA'].iloc[-1] > df['20MA'].iloc[-2]
+                break_upper = p_curr > df['Upper'].iloc[-1]
+                
+                res_tag = "⚪ 未達准入"
+                
+                # 核心通用濾網：突破上軌 + 20MA上揚 + 成交量 > 5億
+                if break_upper and slope_pos and vol_amt >= 5:
+                    # D/E 大盤環境判定
+                    env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
+                    
+                    # 🟢 綠燈：全系列開啟
+                    if "🟢" in env['燈號']:
+                        if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：帶寬共振】"
+                        elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額擴張】"
+                        elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍狙擊】"
+                        elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗浪】"
+                    
+                    # 🟡 黃燈：僅 A, B
+                    elif "🟡" in env['燈號']:
+                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍狙擊】"
+                    
+                    # 🔴 紅燈：僅 A
+                    elif "🔴" in env['燈號']:
+                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+
+                results.append({
+                    "代碼": code, "台股名稱": official_name, "判定結果": res_tag, 
+                    "個股帶寬%": f"{bw*100:.2f}%", "漲幅%": f"{chg*100:.2f}%", 
+                    "成交值(億)": round(vol_amt, 1), "對比比值": round(ratio, 2)
+                })
+        
+        if results:
+            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
