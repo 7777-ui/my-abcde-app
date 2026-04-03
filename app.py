@@ -50,52 +50,41 @@ def get_stock_names():
 
 stock_names = get_stock_names()
 
-# --- 3. 大盤環境偵測 (加入重試、數據清理與點位顯示) ---
+# --- 3. 大盤環境偵測 ---
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for name, sym in indices.items():
         try:
-            # 嘗試抓取兩次防止 yfinance 偶發性失效
             df = yf.download(sym, period="2mo", interval="1d", progress=False)
             if df.empty:
                 time.sleep(1)
                 df = yf.download(sym, period="2mo", interval="1d", progress=False)
             
             if df.empty or len(df) < 20:
-                status[name] = {"燈號": "⚪ 資料不足", "帶寬": 0.0}
+                status[name] = {"燈號": "⚪ 資料不足", "價格": 0.0, "帶寬": 0.0}
                 continue
 
-            # 處理部分 yfinance 回傳的多重索引問題
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             
-            # 計算指標
             df['5MA'] = df['Close'].rolling(5).mean()
             df['20MA'] = df['Close'].rolling(20).mean()
             df['STD'] = df['Close'].rolling(20).std()
             df['BW'] = (df['STD'] * 4) / df['20MA']
             
-            # 取得最後一個有效日
             valid_df = df.dropna(subset=['Close', '5MA', '20MA', 'BW'])
             curr = valid_df.iloc[-1]
             
             price, m5, m20, bw = float(curr['Close']), float(curr['5MA']), float(curr['20MA']), float(curr['BW'])
             
-            # 判定燈號圖示
-            if price > m5: 
-                light_icon = "🟢 綠燈"
-            elif price > m20: 
-                light_icon = "🟡 黃燈"
-            else: 
-                light_icon = "🔴 紅燈"
-            
-            # 將「燈號名稱」與「指數點位」結合
-            status_text = f"{light_icon} ({price:,.2f})"
+            if price > m5: light = "🟢 綠燈"
+            elif price > m20: light = "🟡 黃燈"
+            else: light = "🔴 紅燈"
                 
-            status[name] = {"燈號": status_text, "帶寬": bw}
+            status[name] = {"燈號": light, "價格": price, "帶寬": bw}
         except:
-            status[name] = {"燈號": "⚠️ 偵測中", "帶寬": 0.0}
+            status[name] = {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0}
             
     return status
 
@@ -105,11 +94,16 @@ m_env = get_market_status()
 
 col1, col2 = st.columns(2)
 with col1: 
-    val = m_env.get('上市', {"燈號": "⚠️ 偵測中", "帶寬": 0.0})
-    st.metric("加權指數", val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+    val = m_env.get('上市', {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0})
+    # 將數字放在標題旁：加權指數 (22,345.67)
+    label_text = f"加權指數 ({val['價格']:,.2f})" if val['價格'] > 0 else "加權指數"
+    st.metric(label_text, val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+
 with col2: 
-    val = m_env.get('上櫃', {"燈號": "⚠️ 偵測中", "帶寬": 0.0})
-    st.metric("OTC 指數", val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+    val = m_env.get('上櫃', {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0})
+    # 將數字放在標題旁：OTC 指數 (267.89)
+    label_text = f"OTC 指數 ({val['價格']:,.2f})" if val['價格'] > 0 else "OTC 指數"
+    st.metric(label_text, val['燈號'], f"帶寬: {val['帶寬']:.2%}")
 
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請貼入三竹股池資料", height=200)
@@ -130,7 +124,7 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                     df.columns = df.columns.get_level_values(0)
                 
                 market = "上櫃" if is_otc else "上市"
-                env = m_env.get(market, {"燈號": "🔴 紅燈", "帶寬": 0.0})
+                env = m_env.get(market, {"燈號": "🔴 紅燈", "價格": 0.0, "帶寬": 0.0})
                 
                 df['20MA'] = df['Close'].rolling(20).mean()
                 df['STD'] = df['Close'].rolling(20).std()
@@ -144,7 +138,6 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 bw = float(today['BW'])
                 
                 strategy = "⚪ 未達准入"
-                # 判定邏輯會自動抓取燈號字串中的圖示來判斷
                 if price > up and ma20 > ma20_y and vol_amt >= 5:
                     if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: 
                         strategy = "🔥【A：潛龍爆發】"
