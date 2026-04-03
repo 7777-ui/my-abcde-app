@@ -34,7 +34,9 @@ def get_stock_names():
         url_otc = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
         def fetch(u):
             r = requests.get(u)
-            d = pd.read_html(r.text)[0]
+            # 使用 pandas 讀取網頁表格
+            d_list = pd.read_html(r.text)
+            d = d_list[0]
             d.columns = d.iloc[0]
             d = d.iloc[1:]
             res = {}
@@ -49,35 +51,42 @@ def get_stock_names():
 
 stock_names = get_stock_names()
 
-# --- 3. 大盤環境偵測 ---
+# --- 3. 大盤環境偵測 (修復假日當機與變數衝突) ---
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for name, sym in indices.items():
-        df = yf.download(sym, period="40d", interval="1d", progress=False)
-        if df.empty: continue
+        # 抓取最近一個月，確保週末也有資料
+        df = yf.download(sym, period="1mo", interval="1d", progress=False)
+        
+        if df.empty: 
+            status[name] = {"燈號": "⚪ 無資料", "帶寬": 0.0, "門檻": 0.0}
+            continue
+            
+        # 計算技術指標
         df['5MA'] = df['Close'].rolling(5).mean()
         df['20MA'] = df['Close'].rolling(20).mean()
         df['STD'] = df['Close'].rolling(20).std()
         df['BW'] = (df['STD'] * 4) / df['20MA']
-   # 下載最近一個月的資料 (確保一定能抓到最近的開盤日)
-        df = yf.download(index_symbol, period="1mo", progress=False)
         
-        if not df.empty:
-            # 關鍵：直接取 df 的最後一列 (iloc[-1])，它會自動跳過沒資料的假日
-            curr = df.iloc[-1]
-            price = float(curr['Close'])
-            # 同理，MA 也會根據最後有資料的那天往前算
-            ma5 = float(df['Close'].rolling(5).mean().iloc[-1])
-            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-            
-            # (選配) 如果你想在網頁上顯示這是哪一天的資料
-            last_date = df.index[-1].strftime('%Y-%m-%d')
+        # 取得最後一個交易日的數據 (自動跳過假日)
+        curr = df.iloc[-1]
+        price = float(curr['Close'])
+        m5 = float(curr['5MA'])
+        m20 = float(curr['20MA'])
+        bw = float(curr['BW'])
+        
+        # 燈號判定邏輯
+        light = "🟢 綠燈" if price > m5 else ("延續黃燈" if m5 >= price > m20 else "🔴 紅燈")
+        # 這裡根據你的原邏輯微調
+        if price > m5:
+            light = "🟢 綠燈"
+        elif price <= m5 and price > m20:
+            light = "🟡 黃燈"
         else:
-            price, ma5, ma20 = 0.0, 0.0, 0.0
-        m5, m20 = float(curr['5MA']), float(curr['20MA'])
-        light = "🟢 綠燈" if price > m5 else ("🟡 黃燈" if m5 >= price > m20 else "🔴 紅燈")
-        status[name] = {"燈號": light, "帶寬": float(curr['BW']), "門檻": 0.145 if name == "上市" else 0.095}
+            light = "🔴 紅燈"
+
+        status[name] = {"燈號": light, "帶寬": bw, "門檻": 0.145 if name == "上市" else 0.095}
     return status
 
 # --- 4. 側邊欄設定 ---
@@ -99,40 +108,63 @@ if analyze_btn and raw_input:
     results = []
     with st.spinner(f"正在掃描 {len(codes)} 檔股票..."):
         for code in codes:
-            is_otc = False
+            # 優先嘗試上市，若無則嘗試上櫃
             df = yf.download(f"{code}.TW", period="40d", interval="1d", progress=False)
-            if df.empty:
+            is_otc = False
+            if df.empty or len(df) < 20:
                 df = yf.download(f"{code}.TWO", period="40d", interval="1d", progress=False)
                 is_otc = True
-            if df.empty: continue
+            
+            if df.empty or len(df) < 2: continue
             
             market = "上櫃" if is_otc else "上市"
             env = m_env[market]
+            
+            # 計算個股指標
             df['20MA'] = df['Close'].rolling(20).mean()
             df['STD'] = df['Close'].rolling(20).std()
             df['Upper'] = df['20MA'] + (df['STD'] * 2)
             df['BW'] = (df['STD'] * 4) / df['20MA']
             
             today, yest = df.iloc[-1], df.iloc[-2]
-            price, up, ma20, ma20_y = float(today['Close']), float(today['Upper']), float(today['20MA']), float(yest['20MA'])
+            price = float(today['Close'])
+            up = float(today['Upper'])
+            ma20 = float(today['20MA'])
+            ma20_y = float(yest['20MA'])
             vol_amt = (float(today['Volume']) * price) / 100000000
             chg = (price - float(yest['Close'])) / float(yest['Close'])
             bw = float(today['BW'])
             bw_ratio = bw / env['帶寬'] if env['帶寬'] != 0 else 0
             
-            # 策略判定
+            # --- 你的 ABCDE 核心策略判定 ---
             strategy = "⚪ 未達准入"
             if price > up and ma20 > ma20_y and vol_amt >= 5:
-                if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: strategy = "🔥【A：潛龍爆發】"
-                elif env['燈號'] in ["🟢 綠燈", "🟡 黃燈"] and 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: strategy = "🎯【B：海巡狙擊】"
+                # A 策略
+                if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: 
+                    strategy = "🔥【A：潛龍爆發】"
+                # B 策略 (大盤非紅燈才准入)
+                elif env['燈號'] in ["🟢 綠燈", "🟡 黃燈"] and 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: 
+                    strategy = "🎯【B：海巡狙擊】"
+                # 綠燈限定策略
                 elif env['燈號'] == "🟢 綠燈":
-                    if bw >= 0.2 and 0.8 <= bw_ratio <= 1.2: strategy = "⚡【D/E：瘋狗連動】"
-                    elif bw >= 0.2: strategy = "🌊【C：瘋狗浪】"
-                else: strategy = f"⚠️ 燈號不准入"
+                    if bw >= 0.2 and 0.8 <= bw_ratio <= 1.2: 
+                        strategy = "⚡【D/E：瘋狗連動】"
+                    elif bw >= 0.2: 
+                        strategy = "🌊【C：瘋狗浪】"
+                else: 
+                    strategy = f"⚠️ 燈號不准入 ({env['燈號']})"
 
             results.append({
-                "代碼": code, "名稱": stock_names.get(code, "未知"),
-                "判定": strategy, "指數燈號": env['燈號'],
-                "個股帶寬": f"{bw:.2%}", "漲幅": f"{chg:.2%}", "成交值": f"{vol_amt:.1f}億"
+                "代碼": code, 
+                "名稱": stock_names.get(code, "未知"),
+                "判定": strategy, 
+                "指數燈號": env['燈號'],
+                "個股帶寬": f"{bw:.2%}", 
+                "漲幅": f"{chg:.2%}", 
+                "成交值": f"{vol_amt:.1f}億"
             })
-    st.table(pd.DataFrame(results))
+            
+    if results:
+        st.table(pd.DataFrame(results))
+    else:
+        st.warning("掃描完成，但沒有符合條件的股票。")
