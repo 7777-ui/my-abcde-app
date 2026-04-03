@@ -50,7 +50,7 @@ def get_stock_names():
 
 stock_names = get_stock_names()
 
-# --- 3. 大盤環境偵測 (加入重試與數據清理) ---
+# --- 3. 大盤環境偵測 (加入重試、數據清理與點位顯示) ---
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
@@ -82,11 +82,18 @@ def get_market_status():
             
             price, m5, m20, bw = float(curr['Close']), float(curr['5MA']), float(curr['20MA']), float(curr['BW'])
             
-            if price > m5: light = "🟢 綠燈"
-            elif price > m20: light = "🟡 黃燈"
-            else: light = "🔴 紅燈"
+            # 判定燈號圖示
+            if price > m5: 
+                light_icon = "🟢 綠燈"
+            elif price > m20: 
+                light_icon = "🟡 黃燈"
+            else: 
+                light_icon = "🔴 紅燈"
+            
+            # 將「燈號名稱」與「指數點位」結合
+            status_text = f"{light_icon} ({price:,.2f})"
                 
-            status[name] = {"燈號": light, "帶寬": bw}
+            status[name] = {"燈號": status_text, "帶寬": bw}
         except:
             status[name] = {"燈號": "⚠️ 偵測中", "帶寬": 0.0}
             
@@ -137,10 +144,14 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 bw = float(today['BW'])
                 
                 strategy = "⚪ 未達准入"
+                # 判定邏輯會自動抓取燈號字串中的圖示來判斷
                 if price > up and ma20 > ma20_y and vol_amt >= 5:
-                    if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: strategy = "🔥【A：潛龍爆發】"
-                    elif env['燈號'] != "🔴 紅燈" and 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: strategy = "🎯【B：海巡狙擊】"
-                    elif env['燈號'] == "🟢 綠燈" and bw >= 0.2: strategy = "🌊【C：瘋狗浪】"
+                    if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: 
+                        strategy = "🔥【A：潛龍爆發】"
+                    elif "🔴 紅燈" not in env['燈號'] and 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: 
+                        strategy = "🎯【B：海巡狙擊】"
+                    elif "🟢 綠燈" in env['燈號'] and bw >= 0.2: 
+                        strategy = "🌊【C：瘋狗浪】"
 
                 results.append({
                     "代碼": code, "名稱": stock_names.get(code, "未知"),
