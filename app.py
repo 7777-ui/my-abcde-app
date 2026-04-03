@@ -6,7 +6,7 @@ import requests
 from datetime import datetime
 import os
 import base64
-import pytz  # [2026/04/04 02:08:30] 為了精確台北時區
+import pytz  # [2026/04/04 02:15:30] 為了精確台北時區
 
 # --- 1. 網頁配置與隱藏所有平台雜訊 (完整保留) ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
@@ -59,16 +59,18 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 官方台股名稱抓取 (修正：徹底解決名稱顯示與亂碼) ---
+# --- 3. 🛡️ 官方台股名稱抓取 (修正：加入 Header 偽裝防止被證交所封鎖) ---
 @st.cache_data(ttl=86400)
 def get_tw_official_names():
     mapping = {}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     try:
         for mode in ["2", "4"]:
             url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
-            r = requests.get(url, timeout=10)
-            r.encoding = 'MS950'  # [2026/04/04 02:08:30] 強制解決繁體中文顯示問題
-            df = pd.read_html(r.text)[0]
+            r = requests.get(url, headers=headers, timeout=10)
+            r.encoding = 'MS950'  # 解決繁體中文顯示問題
+            dfs = pd.read_html(r.text)
+            df = dfs[0]
             for item in df.iloc[:, 0]:
                 parts = str(item).split('\u3000') 
                 if len(parts) >= 2:
@@ -108,7 +110,7 @@ with m_col1:
 with m_col2:
     st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
-# [2026/04/04 02:08:30] 校正為台北時區顯示
+# [2026/04/04 02:15:30] 校正為台北時區顯示
 tw_tz = pytz.timezone('Asia/Taipei')
 now_tw = datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M')
 st.write(f"📅 **數據掃描時間（台北）：{now_tw}**")
@@ -122,24 +124,30 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     
     with st.spinner("策略分析中..."):
         for code in codes:
+            # 優先從證交所清單抓取
             official_name = stock_name_map.get(code)
             
             # 下載數據
-            df = yf.download(f"{code}.TW", period="3mo", progress=False)
+            ticker_str = f"{code}.TW"
+            df = yf.download(ticker_str, period="3mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 20:
-                df = yf.download(f"{code}.TWO", period="3mo", progress=False)
+                ticker_str = f"{code}.TWO"
+                df = yf.download(ticker_str, period="3mo", progress=False)
                 m_type = "上櫃"
             
-            # 若官方表沒抓到，嘗試從 Ticker 抓取 (修正正則與取值)
-            if not official_name:
+            # [2026/04/04 02:15:30] 修正：若清單抓不到，使用更穩定的 metadata 提取邏輯
+            if not official_name or official_name == "未知":
                 try:
-                    tk = yf.Ticker(f"{code}.TW" if m_type == "上市" else f"{code}.TWO")
-                    # [2026/04/04 02:08:30] 優先取 longName，排除英文與特殊符號
-                    raw_name = tk.info.get('longName', tk.info.get('shortName', '未知'))
-                    official_name = re.sub(r'[A-Za-z\s\-\.\(\)]+', '', raw_name)
-                    if not official_name: official_name = "未知"
-                except: official_name = "未知"
+                    tk = yf.Ticker(ticker_str)
+                    raw_name = tk.info.get('longName', tk.info.get('shortName', ''))
+                    # 過濾非中文字元
+                    official_name = re.sub(r'[A-Za-z0-9\s\-\.\(\)]+', '', raw_name)
+                    # 若最終仍無名稱，顯示保險名稱
+                    if not official_name:
+                        official_name = f"台股 {code}"
+                except:
+                    official_name = f"台股 {code}"
 
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
