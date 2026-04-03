@@ -38,7 +38,7 @@ def set_bg_fixed(image_file):
         """
         st.markdown(style, unsafe_allow_html=True)
 
-set_bg_fixed("header_image.jpg")
+set_bg_fixed("header_image.png")
 
 # --- 3. 密碼鎖 ---
 def check_password():
