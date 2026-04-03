@@ -49,41 +49,41 @@ def get_stock_names():
 
 stock_names = get_stock_names()
 
-# --- 3. 大盤環境偵測 (鋼鐵防爆縮排版) ---
+# --- 3. 大盤環境偵測 (終極穩定版) ---
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for name, sym in indices.items():
-        # 抓取一個月資料確保週末有數值
-        df = yf.download(sym, period="1mo", interval="1d", progress=False)
-        
-        if df is None or df.empty or len(df) < 5:
-            status[name] = {"燈號": "⚪ 無資料", "帶寬": 0.0}
-            continue
-            
         try:
+            # 抓取 2 個月確保 MA20 計算完全正常
+            df = yf.download(sym, period="2mo", interval="1d", progress=False)
+            
+            if df is None or df.empty or len(df) < 20:
+                status[name] = {"燈號": "⚪ 資料不足", "帶寬": 0.0}
+                continue
+            
+            # 計算指標 (處理多重欄位名稱問題)
             df['5MA'] = df['Close'].rolling(5).mean()
             df['20MA'] = df['Close'].rolling(20).mean()
             df['STD'] = df['Close'].rolling(20).std()
             df['BW'] = (df['STD'] * 4) / df['20MA']
             
-            # 過濾無效行並取最後一筆有效交易日
-            valid_df = df.dropna(subset=['Close', '5MA', '20MA', 'BW'])
-            if valid_df.empty:
-                status[name] = {"燈號": "⚪ 計算失敗", "帶寬": 0.0}
-                continue
-                
-            curr = valid_df.iloc[-1]
-            price, m5, m20, bw = float(curr['Close']), float(curr['5MA']), float(curr['20MA']), float(curr['BW'])
+            # 取得最後一個有效交易日
+            curr = df.dropna(subset=['Close', '5MA', '20MA', 'BW']).iloc[-1]
             
-            # 燈號邏輯
+            price = float(curr['Close'])
+            m5 = float(curr['5MA'])
+            m20 = float(curr['20MA'])
+            bw = float(curr['BW'])
+            
+            # 判定燈號
             if price > m5: light = "🟢 綠燈"
             elif price > m20: light = "🟡 黃燈"
             else: light = "🔴 紅燈"
                 
             status[name] = {"燈號": light, "帶寬": bw}
         except:
-            status[name] = {"燈號": "⚠️ 錯誤", "帶寬": 0.0}
+            status[name] = {"燈號": "⚠️ 偵測中", "帶寬": 0.0}
             
     return status
 
@@ -92,25 +92,31 @@ st.title("🏹 私密戰情室：ABCDE 策略判定")
 m_env = get_market_status()
 
 col1, col2 = st.columns(2)
-with col1: st.metric("加權指數", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
-with col2: st.metric("OTC 指數", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+with col1: 
+    val = m_env.get('上市', {"燈號": "資料讀取中", "帶寬": 0.0})
+    st.metric("加權指數", val['燈號'], f"帶寬: {val['帶寬']:.2%}")
+with col2: 
+    val = m_env.get('上櫃', {"燈號": "資料讀取中", "帶寬": 0.0})
+    st.metric("OTC 指數", val['燈號'], f"帶寬: {val['帶寬']:.2%}")
 
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請貼入三竹股池資料", height=200)
+
 if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
-    with st.spinner("同步分析中..."):
+    with st.spinner("同步掃描中..."):
         for code in codes:
-            df = yf.download(f"{code}.TW", period="1mo", progress=False)
+            # 優先嘗試上市，不行再嘗試上櫃
+            df = yf.download(f"{code}.TW", period="2mo", progress=False)
             is_otc = False
             if df.empty:
-                df = yf.download(f"{code}.TWO", period="1mo", progress=False)
+                df = yf.download(f"{code}.TWO", period="2mo", progress=False)
                 is_otc = True
             
             if not df.empty and len(df) >= 20:
                 market = "上櫃" if is_otc else "上市"
-                env = m_env[market]
+                env = m_env.get(market, {"燈號": "🔴 紅燈", "帶寬": 0.0})
                 
                 df['20MA'] = df['Close'].rolling(20).mean()
                 df['STD'] = df['Close'].rolling(20).std()
@@ -118,19 +124,30 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df['BW'] = (df['STD'] * 4) / df['20MA']
                 
                 today, yest = df.iloc[-1], df.iloc[-2]
-                price, up, ma20, ma20_y = float(today['Close']), float(today['Upper']), float(today['20MA']), float(yest['20MA'])
+                price = float(today['Close'])
+                up = float(today['Upper'])
+                ma20 = float(today['20MA'])
+                ma20_y = float(yest['20MA'])
                 vol_amt = (float(today['Volume']) * price) / 100000000
                 chg = (price - float(yest['Close'])) / float(yest['Close'])
                 bw = float(today['BW'])
                 
-                # 簡化版 ABCDE 判定邏輯範例
+                # --- 核心 ABCDE 策略 ---
                 strategy = "⚪ 未達准入"
                 if price > up and ma20 > ma20_y and vol_amt >= 5:
-                    if 0.05 <= bw <= 0.1: strategy = "🔥【A：潛龍爆發】"
-                    elif env['燈號'] != "🔴 紅燈": strategy = "🎯【策略准入】"
+                    if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: 
+                        strategy = "🔥【A：潛龍爆發】"
+                    elif env['燈號'] != "🔴 紅燈" and 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05:
+                        strategy = "🎯【B：海巡狙擊】"
+                    elif env['燈號'] == "🟢 綠燈" and bw >= 0.2:
+                        strategy = "🌊【C：瘋狗浪】"
 
                 results.append({
                     "代碼": code, "名稱": stock_names.get(code, "未知"),
-                    "判定": strategy, "個股帶寬": f"{bw:.2%}", "漲幅": f"{chg:.2%}"
+                    "判定": strategy, "個股帶寬": f"{bw:.2%}", "漲幅": f"{chg:.2%}", "成交值": f"{vol_amt:.1f}億"
                 })
-        st.table(pd.DataFrame(results))
+        
+        if results:
+            st.table(pd.DataFrame(results))
+        else:
+            st.warning("找不到有效代碼")
