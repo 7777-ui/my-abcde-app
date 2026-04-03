@@ -3,14 +3,14 @@ import yfinance as yf
 import pandas as pd
 import re
 import requests
-import time
+from datetime import datetime
 import os
 import base64
 
-# --- 1. 設置網頁配置 ---
+# --- 1. 網頁配置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-# --- 2. 核心 CSS 優化 (包含凍結窗格與背景設定) ---
+# --- 2. CSS 視覺與精確凍結窗格 ---
 def set_bg_fixed(image_file):
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
@@ -18,7 +18,6 @@ def set_bg_fixed(image_file):
         b64_encoded = base64.b64encode(img_data).decode()
         style = f"""
         <style>
-        /* 背景設定 */
         .stApp {{
             background-image: url("data:image/png;base64,{b64_encoded}");
             background-attachment: fixed;
@@ -31,25 +30,25 @@ def set_bg_fixed(image_file):
             content: "";
             position: absolute;
             top: 0; left: 0; width: 100%; height: 100%;
-            background-color: rgba(0, 0, 0, 0.75); 
+            background-color: rgba(0, 0, 0, 0.7); 
             z-index: -1;
         }}
 
-        /* 凍結窗格：固定大盤數據在頂部 */
-        [data-testid="stVerticalBlock"] > div:nth-child(2) {{
+        /* 凍結窗格：固定大盤卡片區塊 */
+        [data-testid="stHorizontalBlock"] {{
             position: sticky;
-            top: 0rem;
-            z-index: 999;
-            background-color: rgba(14, 17, 23, 0.9);
-            padding: 10px;
+            top: 0px;
+            z-index: 1000;
+            background-color: rgba(14, 17, 23, 0.95);
+            padding: 15px 0;
             border-bottom: 2px solid #4CAF50;
         }}
 
-        /* 表格視覺優化 */
-        .stDataFrame {{
-            background-color: rgba(20, 20, 20, 0.9) !important;
-            border-radius: 10px;
-            border: 1px solid #444;
+        /* 表格區塊底色加深 */
+        [data-testid="stDataFrame"] {{
+            background-color: rgba(10, 10, 10, 0.9) !important;
+            padding: 10px;
+            border-radius: 5px;
         }}
         
         header {{ visibility: hidden; }}
@@ -75,7 +74,24 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 4. 大盤環境偵測 ---
+# --- 4. 穩定版中文名稱抓取 ---
+@st.cache_data(ttl=3600)
+def get_tw_stock_names():
+    res = {}
+    for mode in [2, 4]:
+        try:
+            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
+            r = requests.get(url)
+            df = pd.read_html(r.text)[0]
+            for val in df.iloc[:, 0]:
+                parts = str(val).split('\u3000')
+                if len(parts) >= 2: res[parts[0].strip()] = parts[1].strip()
+        except: continue
+    return res
+
+tw_names = get_tw_stock_names()
+
+# --- 5. 大盤燈號核心 ---
 @st.cache_data(ttl=300)
 def get_market_status():
     status = {}
@@ -98,11 +114,11 @@ def get_market_status():
         except: status[name] = {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0}
     return status
 
-# --- 5. 介面佈局 ---
-st.title("🏹 私密戰情室：姊布林ABCDE 策略判定")
+# --- 6. 介面佈局 ---
+st.markdown("### 🏹 私密戰情室：姊布林ABCDE 策略判定")
 m_env = get_market_status()
 
-# 頂部固定區域 (大盤資訊)
+# 凍結區：燈號與帶寬
 m_col1, m_col2 = st.columns(2)
 with m_col1:
     d1 = m_env.get('上市')
@@ -111,7 +127,9 @@ with m_col2:
     d2 = m_env.get('上櫃')
     st.metric(f"OTC 指數 ({d2['價格']:,.2f})", d2['燈號'], f"帶寬: {d2['帶寬']:.2%}")
 
-# --- 6. 側邊欄輸入 ---
+# 表格上方日期顯示
+st.markdown(f"📅 **掃描日期：{datetime.now().strftime('%Y/%m/%d')}**")
+
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請輸入股票代碼", height=200)
 
@@ -119,26 +137,22 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
     
-    with st.spinner("正在抓取個股名稱與分析..."):
+    with st.spinner("台股中文名稱同步與策略計算中..."):
         for code in codes:
-            # 抓取名稱邏輯：使用 yf.Ticker 直接獲取，最準確
-            tk = yf.Ticker(f"{code}.TW")
-            name = tk.info.get('shortName', tk.info.get('longName', "未知"))
+            # 優先使用 TWSE 中文清單，若無則試 yfinance
+            name = tw_names.get(code)
+            if not name:
+                tk = yf.Ticker(f"{code}.TW")
+                name = tk.info.get('shortName', "未知")
             
             df = yf.download(f"{code}.TW", period="2mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 20:
-                tk = yf.Ticker(f"{code}.TWO")
-                name = tk.info.get('shortName', tk.info.get('longName', "未知"))
                 df = yf.download(f"{code}.TWO", period="2mo", progress=False)
                 m_type = "上櫃"
-            
-            # 清理名稱中的代碼 (例如 "2330 台積電" -> "台積電")
-            name = name.replace(code, "").strip()
 
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                
                 env = m_env.get(m_type)
                 idx_bw = env['帶寬']
                 
@@ -154,10 +168,10 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 bw = float(today['BW'])
                 ratio = bw / idx_bw if idx_bw > 0 else 0
                 
+                # --- 策略判定邏輯 (紅黃綠限制) ---
                 strategy = "⚪ 未達准入"
                 if price > up and ma20 > ma20_y and vol_amt >= 5:
                     is_de_env = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
-                    
                     if is_de_env and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05:
                         strategy = "💎【D：帶寬共振】" if "🟢 綠燈" in env['燈號'] else "⚠️ D受限(需綠燈)"
                     elif is_de_env and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07:
@@ -176,15 +190,16 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 })
         
         if results:
-            final_df = pd.DataFrame(results)
-            # 使用 st.dataframe 代替 st.table 以獲得原生篩選與排序功能
+            # 顯示中文化篩選功能的表格
             st.dataframe(
-                final_df, 
+                pd.DataFrame(results), 
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    "個股帶寬": st.column_config.NumberColumn(format="%.2f%%"),
-                    "漲幅%": st.column_config.NumberColumn(format="%.2f%%"),
+                    "個股帶寬": st.column_config.NumberColumn("個股帶寬 %", format="%.2f"),
+                    "漲幅%": st.column_config.NumberColumn("漲幅 %", format="%.2f"),
+                    "比值": st.column_config.NumberColumn("帶寬比值"),
+                    "判定": st.column_config.TextColumn("策略判定結果")
                 }
             )
         else:
