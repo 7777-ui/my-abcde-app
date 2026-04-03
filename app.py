@@ -12,20 +12,27 @@ st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹",
 
 def set_ui_cleanup(image_file):
     b64_encoded = ""
+    # 支援 jpg 或 png 格式
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
             b64_encoded = base64.b64encode(f.read()).decode()
             
     style = f"""
     <style>
+    /* 背景圖設定 */
     .stApp {{
-        background-image: url("data:image/png;base64,{b64_encoded}");
+        background-image: url("data:image/jpeg;base64,{b64_encoded}");
         background-attachment: fixed;
         background-size: cover;
+        background-position: center;
     }}
+    /* 半透明遮罩，確保文字清晰 */
     .stApp::before {{
-        content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-        background-color: rgba(0, 0, 0, 0.65); z-index: -1;
+        content: ""; 
+        position: absolute; 
+        top: 0; left: 0; width: 100%; height: 100%;
+        background-color: rgba(0, 0, 0, 0.7); 
+        z-index: -1;
     }}
 
     /* 🔴 徹底隱藏 Manage app 與所有 Streamlit 標籤 (解決問題 2) */
@@ -35,22 +42,31 @@ def set_ui_cleanup(image_file):
     footer, header, #MainMenu {{
         display: none !important;
         visibility: hidden !important;
+        height: 0 !important;
+        width: 0 !important;
     }}
 
     /* 凍結窗格：大盤資訊區 */
     div[data-testid="stHorizontalBlock"] {{
         position: sticky; top: 0px; z-index: 1000;
-        background-color: rgba(30, 30, 30, 0.5); 
+        background-color: rgba(30, 30, 30, 0.6); 
         padding: 15px; border-radius: 12px;
         backdrop-filter: blur(10px);
+    }}
+    
+    /* 表格樣式美化 */
+    .stDataFrame, .stTable {{
+        background-color: rgba(20, 20, 20, 0.8) !important;
+        border-radius: 10px;
     }}
     </style>
     """
     st.markdown(style, unsafe_allow_html=True)
 
+# 確保檔名與您上傳的文件一致 (header_image.jpg)
 set_ui_cleanup("header_image.jpg")
 
-# --- 2. 🔐 密碼鎖 (回歸) ---
+# --- 2. 🔐 密碼鎖 ---
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
 
@@ -64,18 +80,17 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 官方台股名稱抓取 (解決問題 1：英文/未知名稱) ---
+# --- 3. 🛡️ 官方台股名稱抓取 (解決問題 1：名稱錯誤) ---
 @st.cache_data(ttl=86400)
 def get_tw_official_names():
     mapping = {}
     try:
-        # 直接抓取證交所與櫃買中心數據源
         for mode in ["2", "4"]:
             url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
             r = requests.get(url, timeout=10)
             df = pd.read_html(r.text)[0]
             for item in df.iloc[:, 0]:
-                parts = str(item).split('\u3000') # 使用全形空格分割代碼與中文名
+                parts = str(item).split('\u3000') 
                 if len(parts) >= 2:
                     mapping[parts[0].strip()] = parts[1].strip()
     except: pass
@@ -83,7 +98,7 @@ def get_tw_official_names():
 
 stock_name_map = get_tw_official_names()
 
-# --- 4. 大盤環境偵測 (吻合燈號策略) ---
+# --- 4. 大盤環境偵測 (嚴格對應 ABCDE 燈號) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
@@ -108,7 +123,7 @@ def get_market_env():
 
 m_env = get_market_env()
 
-# --- 5. 主畫面執行 ---
+# --- 5. 主畫面與策略判定 ---
 st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
 m_col1, m_col2 = st.columns(2)
 with m_col1:
@@ -118,7 +133,6 @@ with m_col2:
 
 st.write(f"📅 **數據掃描時間：{datetime.now().strftime('%Y/%m/%d %H:%M')}**")
 
-# 側邊欄
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請輸入股票代碼", height=250)
 
@@ -128,69 +142,55 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     
     with st.spinner("策略同步分析中..."):
         for code in codes:
-            # 名稱校正
+            # 1. 取得中文名稱
             official_name = stock_name_map.get(code)
             
-            # 下載數據
+            # 2. 下載數據 (上市或上櫃)
             df = yf.download(f"{code}.TW", period="3mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 20:
                 df = yf.download(f"{code}.TWO", period="3mo", progress=False)
                 m_type = "上櫃"
             
-            # 如果還是找不到名稱，從 yf 抓取後過濾英文字母
             if not official_name:
                 try:
-                    tk = yf.Ticker(f"{code}.TW")
-                    raw_n = tk.info.get('shortName', "未知")
-                    official_name = re.sub(r'[A-Za-z\s]+', '', raw_n)
+                    tk = yf.Ticker(f"{code}.TW" if m_type == "上市" else f"{code}.TWO")
+                    official_name = re.sub(r'[A-Za-z\s]+', '', tk.info.get('shortName', '未知'))
                 except: official_name = "未知"
 
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 env = m_env[m_type]
                 
-                # 計算個股指標
+                # 指標計算
                 df['20MA'] = df['Close'].rolling(20).mean()
-                df['STD'] = df['Close'].rolling(20).std()
-                df['Upper'] = df['20MA'] + (df['STD'] * 2)
-                
+                df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
                 p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                bw = (df['STD'].iloc[-1] * 4) / df['20MA'].iloc[-1]
+                bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / df['20MA'].iloc[-1]
                 chg = (p_curr - p_yest) / p_yest
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
-                slope_pos = df['20MA'].iloc[-1] > df['20MA'].iloc[-2] # 20MA 上揚
-                break_upper = p_curr > df['Upper'].iloc[-1] # 突破布林上軌
+                slope_pos = df['20MA'].iloc[-1] > df['20MA'].iloc[-2]
+                break_upper = p_curr > df['Upper'].iloc[-1]
                 
                 res_tag = "⚪ 未達准入"
                 
                 # 核心門檻：突破上軌 + 20MA上揚 + 成交值>5億
                 if break_upper and slope_pos and vol_amt >= 5:
-                    # 💡 策略 D & E 條件
+                    # 判定是否滿足 DE 環境 (大盤帶寬)
                     env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
                     
                     if "🟢 綠燈" in env['燈號']:
-                        if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05:
-                            res_tag = "💎【D：帶寬共振】"
-                        elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07:
-                            res_tag = "🚀【E：超額擴張】"
-                        elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07:
-                            res_tag = "🔥【A：潛龍爆發】"
-                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05:
-                            res_tag = "🎯【B：海龍狙擊】"
-                        elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07:
-                            res_tag = "🌊【C：瘋狗浪】"
-                            
+                        if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：帶寬共振】"
+                        elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額擴張】"
+                        elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍狙擊】"
+                        elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗浪】"
                     elif "🟡 黃燈" in env['燈號']:
-                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07:
-                            res_tag = "🔥【A：潛龍爆發】"
-                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05:
-                            res_tag = "🎯【B：海龍狙擊】"
-                            
+                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍狙擊】"
                     elif "🔴 紅燈" in env['燈號']:
-                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07:
-                            res_tag = "🔥【A：潛龍爆發】"
+                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
 
                 results.append({
                     "代碼": code, "台股名稱": official_name, "判定結果": res_tag, 
