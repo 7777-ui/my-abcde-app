@@ -52,37 +52,50 @@ stock_names = get_stock_names()
 # --- 3. 大盤環境偵測 (徹底解決週末報錯版本) ---
 def get_market_status():
     status = {}
+    def get_market_status():
+    status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for name, sym in indices.items():
-        # 抓取最近一個月資料，確保一定有最後交易日
+        # 抓取最近一個月資料
         df = yf.download(sym, period="1mo", interval="1d", progress=False)
         
-        if df.empty or len(df) < 20:
-            status[name] = {"燈號": "⚪ 資料不足", "帶寬": 0.0, "門檻": 0.0}
+        # 核心防呆：如果 df 是空的，直接給預設值跳過
+        if df is None or df.empty or len(df) < 5:
+            status[name] = {"燈號": "⚪ 無資料", "帶寬": 0.0, "門檻": 0.0}
             continue
             
-        # 計算指標
-        df['5MA'] = df['Close'].rolling(5).mean()
-        df['20MA'] = df['Close'].rolling(20).mean()
-        df['STD'] = df['Close'].rolling(20).std()
-        df['BW'] = (df['STD'] * 4) / df['20MA']
-        
-        # 取得最後一行非空資料
-        curr = df.iloc[-1]
-        
-        # 確保價格不是空的
-        price = float(curr['Close'])
-        m5 = float(curr['5MA'])
-        m20 = float(curr['20MA'])
-        bw = float(curr['BW'])
-        
-        # 燈號判定
-        if price > m5:
-            light = "🟢 綠燈"
-        elif m5 >= price > m20:
-            light = "🟡 黃燈"
-        else:
-            light = "🔴 紅燈"
+        try:
+            # 計算指標
+            df['5MA'] = df['Close'].rolling(5).mean()
+            df['20MA'] = df['Close'].rolling(20).mean()
+            df['STD'] = df['Close'].rolling(20).std()
+            df['BW'] = (df['STD'] * 4) / df['20MA']
+            
+            # 取得最後一個「非空值」的列
+            valid_df = df.dropna(subset=['Close', '5MA', '20MA', 'BW'])
+            if valid_df.empty:
+                status[name] = {"燈號": "⚪ 計算失敗", "帶寬": 0.0, "門檻": 0.0}
+                continue
+                
+            curr = valid_df.iloc[-1]
+            price = float(curr['Close'])
+            m5 = float(curr['5MA'])
+            m20 = float(curr['20MA'])
+            bw = float(curr['BW'])
+            
+            # 燈號判定
+            if price > m5:
+                light = "🟢 綠燈"
+            elif price > m20:
+                light = "🟡 黃燈"
+            else:
+                light = "🔴 紅燈"
+                
+            status[name] = {"燈號": light, "帶寬": bw, "門檻": 0.145 if name == "上市" else 0.095}
+        except Exception as e:
+            status[name] = {"燈號": "⚠️ 錯誤", "帶寬": 0.0, "門檻": 0.0}
+            
+    return status
             
         status[name] = {"燈號": light, "帶寬": bw, "門檻": 0.145 if name == "上市" else 0.095}
     return status
