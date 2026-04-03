@@ -4,10 +4,49 @@ import pandas as pd
 import re
 import requests
 import time
+import os
+import base64
 
-# --- 1. 設置網頁標題與密碼鎖 ---
-st.set_page_config(page_title="🏹 ABCDE 戰情室", layout="wide")
+# --- 1. 設置網頁配置 ---
+st.set_page_config(
+    page_title="🏹 姊布林ABCDE 戰情室",
+    page_icon="🏹",
+    layout="wide"
+)
 
+# --- 2. 背景圖片處理函數 (將圖片轉為背景 CSS) ---
+def set_bg_fixed(image_file):
+    if os.path.exists(image_file):
+        with open(image_file, "rb") as f:
+            img_data = f.read()
+        b64_encoded = base64.b64encode(img_data).decode()
+        style = f"""
+        <style>
+        .stApp {{
+            background-image: url("data:image/png;base64,{b64_encoded}");
+            background-attachment: fixed;
+            background-size: cover;
+            background-position: center;
+        }}
+        /* 增加一層半透明遮罩，確保文字清晰 */
+        .stApp::before {{
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6); 
+            z-index: -1;
+        }}
+        </style>
+        """
+        st.markdown(style, unsafe_allow_html=True)
+
+# 執行背景設定
+set_bg_fixed("header_image.png")
+
+# --- 3. 密碼鎖 ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
@@ -27,7 +66,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 2. 核心抓取邏輯 (快取名稱表) ---
+# --- 4. 核心抓取邏輯 (快取名稱表) ---
 @st.cache_data
 def get_stock_names():
     try:
@@ -50,7 +89,7 @@ def get_stock_names():
 
 stock_names = get_stock_names()
 
-# --- 3. 大盤環境偵測 ---
+# --- 5. 大盤環境偵測 ---
 def get_market_status():
     status = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
@@ -83,16 +122,16 @@ def get_market_status():
             status[name] = {"燈號": "⚠️ 偵測中", "價格": 0.0, "帶寬": 0.0}
     return status
 
-# --- 4. 介面執行與視覺美化 ---
-st.title("🏹 私密戰情室：ABCDE 策略判定")
+# --- 6. 介面執行 ---
+st.title("🏹 私密戰情室：姊布林ABCDE 策略判定")
 m_env = get_market_status()
 
-# 自定義顯示組件 (解決字體大小不一問題)
+# 自定義卡片顯示組件 (調整半透明度，讓背景透出來更好看)
 def draw_market_card(title, data):
     price_str = f"{data['價格']:,.2f}" if data['價格'] > 0 else "---"
     bw_str = f"{data['帶寬']:.2%}"
     st.markdown(f"""
-        <div style="background-color: #1E1E1E; padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50;">
+        <div style="background-color: rgba(30, 30, 30, 0.8); padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50; margin-bottom: 20px;">
             <p style="color: #AAAAAA; font-size: 24px; margin-bottom: 5px;">{title} ({price_str})</p>
             <p style="color: white; font-size: 42px; font-weight: bold; margin: 0;">{data['燈號']}</p>
             <p style="color: #4CAF50; font-size: 22px; margin-top: 10px;">↑ 帶寬: {bw_str}</p>
@@ -105,15 +144,13 @@ with col1:
 with col2:
     draw_market_card("OTC 指數", m_env.get('上櫃', {"燈號": "偵測中", "價格": 0.0, "帶寬": 0.0}))
 
-st.markdown("<br>", unsafe_allow_html=True)
-
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請貼入三竹股池資料", height=200)
 
 if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
-    with st.spinner("同步分析中..."):
+    with st.spinner("同步掃描分析中..."):
         for code in codes:
             df = yf.download(f"{code}.TW", period="2mo", progress=False)
             is_otc = False
@@ -156,4 +193,4 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
         if results:
             st.table(pd.DataFrame(results))
         else:
-            st.warning("無有效代碼")
+            st.warning("無有效股票代碼資料")
