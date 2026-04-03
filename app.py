@@ -14,8 +14,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. 背景圖片處理函數 (將圖片轉為背景 CSS) ---
-def set_bg_fixed(image_file):
+# --- 2. 核心：自適應背景圖片函數 (徹底解決大小不適應問題) ---
+def set_bg_fixed_responsive(image_file):
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
             img_data = f.read()
@@ -25,10 +25,16 @@ def set_bg_fixed(image_file):
         .stApp {{
             background-image: url("data:image/png;base64,{b64_encoded}");
             background-attachment: fixed;
-            background-size: cover;
-            background-position: center;
+            
+            /* 關鍵：自適應縮放 */
+            background-size: cover; /* 如果要完全填滿不留白(可能會切圖)用 cover */
+            /* 備選：如果想看到整張圖(可能會留白)用 contain */
+            
+            background-position: center center; /* 固定置中 */
+            background-repeat: no-repeat;
         }}
-        /* 增加一層半透明遮罩，確保文字清晰 */
+        
+        /* 增加一層半透明黑遮罩，確保文字與燈號清晰 */
         .stApp::before {{
             content: "";
             position: absolute;
@@ -36,15 +42,20 @@ def set_bg_fixed(image_file):
             left: 0;
             width: 100%;
             height: 100%;
-            background-color: rgba(0, 0, 0, 0.6); 
+            background-color: rgba(0, 0, 0, 0.65); /* 稍微加深遮罩，質感更好 */
             z-index: -1;
+        }}
+        
+        /* 隱藏預設頭部，視覺更乾淨 */
+        header {{
+            visibility: hidden;
         }}
         </style>
         """
         st.markdown(style, unsafe_allow_html=True)
 
 # 執行背景設定
-set_bg_fixed("header_image.png")
+set_bg_fixed_responsive("header_image.png")
 
 # --- 3. 密碼鎖 ---
 def check_password():
@@ -126,15 +137,15 @@ def get_market_status():
 st.title("🏹 私密戰情室：姊布林ABCDE 策略判定")
 m_env = get_market_status()
 
-# 自定義卡片顯示組件 (調整半透明度，讓背景透出來更好看)
+# 自定義卡片顯示組件 (調整半透明度與間距，視覺更統一)
 def draw_market_card(title, data):
     price_str = f"{data['價格']:,.2f}" if data['價格'] > 0 else "---"
     bw_str = f"{data['帶寬']:.2%}"
     st.markdown(f"""
-        <div style="background-color: rgba(30, 30, 30, 0.8); padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50; margin-bottom: 20px;">
-            <p style="color: #AAAAAA; font-size: 24px; margin-bottom: 5px;">{title} ({price_str})</p>
-            <p style="color: white; font-size: 42px; font-weight: bold; margin: 0;">{data['燈號']}</p>
-            <p style="color: #4CAF50; font-size: 22px; margin-top: 10px;">↑ 帶寬: {bw_str}</p>
+        <div style="background-color: rgba(30, 30, 30, 0.75); padding: 25px; border-radius: 12px; border-left: 6px solid #4CAF50; margin-bottom: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+            <p style="color: #AAAAAA; font-size: 24px; margin-bottom: 8px;">{title} ({price_str})</p>
+            <p style="color: white; font-size: 46px; font-weight: bold; margin: 0;">{data['燈號']}</p>
+            <p style="color: #4CAF50; font-size: 22px; margin-top: 12px; font-weight: bold;">↑ 帶寬: {bw_str}</p>
         </div>
     """, unsafe_allow_html=True)
 
@@ -143,6 +154,8 @@ with col1:
     draw_market_card("加權指數", m_env.get('上市', {"燈號": "偵測中", "價格": 0.0, "帶寬": 0.0}))
 with col2:
     draw_market_card("OTC 指數", m_env.get('上櫃', {"燈號": "偵測中", "價格": 0.0, "帶寬": 0.0}))
+
+st.markdown("<br><hr><br>", unsafe_allow_html=True)
 
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("請貼入三竹股池資料", height=200)
@@ -171,7 +184,10 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df['BW'] = (df['STD'] * 4) / df['20MA']
                 
                 today, yest = df.iloc[-1], df.iloc[-2]
-                price, up, ma20, ma20_y = float(today['Close']), float(today['Upper']), float(today['20MA']), float(yest['20MA'])
+                price = float(today['Close'])
+                up = float(today['Upper'])
+                ma20 = float(today['20MA'])
+                ma20_y = float(yest['20MA'])
                 vol_amt = (float(today['Volume']) * price) / 100000000
                 chg = (price - float(yest['Close'])) / float(yest['Close'])
                 bw = float(today['BW'])
