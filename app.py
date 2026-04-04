@@ -61,7 +61,7 @@ def get_names_from_local_files():
                 # 抓取邏輯：第一欄為代碼，第二欄為名稱
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
-                    name = str(row.iloc[1]).strip()
+                    name = str(row.iloc[2]).strip()
                     if code.isdigit():
                         mapping[code] = name
             except: pass
