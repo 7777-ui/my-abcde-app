@@ -8,14 +8,14 @@ import os
 import base64
 import pytz
 
-# [2026/04/04 02:22:10] 網頁配置與隱藏所有平台雜訊
+# --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
 def set_ui_cleanup(image_file):
     b64_encoded = ""
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
-            b64_encoded = base64.b64encode(f.read()).decode()
+            b64_encoded = base64.     b64encode(f.read()).decode()
     style = f"""
     <style>
     .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
@@ -42,26 +42,32 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 官方台股名稱抓取 (修正：更強韌的抓取邏輯) ---
-@st.cache_data(ttl=86400)
-def get_tw_official_names():
+# --- 3. 🛡️ 本地 CSV 讀取 (對應檔案：TWSE.csv 與 TPEX.csv) ---
+@st.cache_data(ttl=604800)
+def get_names_from_local_files():
     mapping = {}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)'}
-    try:
-        for mode in ["2", "4"]:
-            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
-            r = requests.get(url, headers=headers, timeout=15)
-            r.encoding = 'MS950'
-            dfs = pd.read_html(r.text)
-            df = dfs[0]
-            for item in df.iloc[:, 0]:
-                parts = str(item).split('\u3000') 
-                if len(parts) >= 2:
-                    mapping[parts[0].strip()] = parts[1].strip()
-    except: pass
+    # 根據 GitHub 顯示的完整檔名進行對應
+    files = ["TWSE.csv", "TPEX.csv"] 
+    
+    for f_name in files:
+        if os.path.exists(f_name):
+            try:
+                # 優先嘗試 utf-8-sig，失敗則嘗試 cp950
+                try:
+                    df_local = pd.read_csv(f_name, encoding='utf-8-sig')
+                except:
+                    df_local = pd.read_csv(f_name, encoding='cp950')
+                
+                # 抓取邏輯：第一欄為代碼，第二欄為名稱
+                for _, row in df_local.iterrows():
+                    code = str(row.iloc[0]).strip()
+                    name = str(row.iloc[1]).strip()
+                    if code.isdigit():
+                        mapping[code] = name
+            except: pass
     return mapping
 
-stock_name_map = get_tw_official_names()
+stock_name_map = get_names_from_local_files()
 
 # --- 4. 大盤環境偵測 ---
 @st.cache_data(ttl=300)
@@ -101,27 +107,17 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     
     with st.spinner("策略分析中..."):
         for code in codes:
-            # [2026/04/04 02:22:10] 優先級 1: 從證交所快取清單抓取
+            # 直接從 CSV 對照表拿名字
             official_name = stock_name_map.get(code)
             
-            # 下載歷史數據
+            # 下載個股數據（用於 ABCDE 判定）
             df = yf.download(f"{code}.TW", period="3mo", progress=False)
             m_type = "上市"
-            if df.empty or len(df) < 20:
+            if df.empty or len(df) < 10:
                 df = yf.download(f"{code}.TWO", period="3mo", progress=False)
                 m_type = "上櫃"
-            
-            # [2026/04/04 02:22:10] 優先級 2: 如果清單抓不到且 official_name 是空或標點
-            if not official_name or len(re.sub(r'[^\u4e00-\u9fa5]+', '', official_name)) == 0:
-                try:
-                    # 改用快速的 Ticker 抓取，並強化正規表達式
-                    tk = yf.Ticker(f"{code}.TW" if m_type == "上市" else f"{code}.TWO")
-                    # 抓取 Ticker 中的名稱並只留下「中文字」
-                    raw_n = tk.info.get('shortName', tk.info.get('longName', ''))
-                    official_name = "".join(re.findall(r'[\u4e00-\u9fa5]+', raw_n))
-                except: pass
-            
-            # [2026/04/04 02:22:10] 優先級 3: 最終保險（若依然抓不到則顯示 代碼）
+
+            # 若對照表依然沒抓到（例如剛掛牌的新股），顯示保險名稱
             if not official_name:
                 official_name = f"台股 {code}"
 
