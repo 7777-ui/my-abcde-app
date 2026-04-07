@@ -2,17 +2,16 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import re
-import requests
-from datetime import datetime
 import os
 import base64
 import pytz
-from streamlit_autorefresh import st_autorefresh  # 1. 引入自動刷新套件
+from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-# 2. 設定自動刷新：每 300,000 毫秒 (5分鐘) 自動觸發一次，不會導致密碼登出
+# 設定自動刷新：每 5 分鐘觸發一次內部 Rerun，維持大盤數據更新且不會導致登出
 st_autorefresh(interval=300000, key="datarefresh")
 
 def set_ui_cleanup(image_file):
@@ -33,9 +32,10 @@ def set_ui_cleanup(image_file):
 
 set_ui_cleanup("header_image.png")
 
-# --- 2. 🔐 密碼鎖 ---
+# --- 2. 🔐 密碼鎖與登出功能 ---
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
+
 if not st.session_state.password_correct:
     st.markdown("## 🔒 私人戰情室登入")
     pwd = st.text_input("請輸入密碼", type="password")
@@ -46,7 +46,12 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 本地 CSV 讀取 (對應檔案：TWSE.csv 與 TPEX.csv) ---
+# 側邊欄：增加登出按鈕
+if st.sidebar.button("🔐 安全登出"):
+    st.session_state.password_correct = False
+    st.rerun()
+
+# --- 3. 🛡️ 本地 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_names_from_local_files():
     mapping = {}
@@ -58,38 +63,44 @@ def get_names_from_local_files():
                     df_local = pd.read_csv(f_name, encoding='utf-8-sig')
                 except:
                     df_local = pd.read_csv(f_name, encoding='cp950')
-                
-                # 抓取邏輯：第一欄為代碼，第三欄(iloc[2])為細分類名稱
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
                     name = str(row.iloc[2]).strip()
-                    if code.isdigit():
-                        mapping[code] = name
+                    if code.isdigit(): mapping[code] = name
             except: pass
     return mapping
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (修正版：解決 0.00 顯示問題) ---
+# --- 4. 大盤環境偵測 (修正 nan% 核心邏輯) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for k, v in indices.items():
         try:
-            # 抓取近期數據，強制移除 NaN 確保 iloc[-1] 有值
-            df = yf.download(v, period="1mo", progress=False)
+            # 下載 4 個月數據確保標準差計算穩定
+            df = yf.download(v, period="4mo", progress=False)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             df = df.dropna(subset=['Close'])
             
             c = df['Close'].iloc[-1]
             m5 = df['Close'].rolling(5).mean().iloc[-1]
             m20 = df['Close'].rolling(20).mean().iloc[-1]
-            bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / m20
             
+            # 修正 nan% 關鍵：計算標準差並檢查是否有效
+            std_series = df['Close'].rolling(20).std()
+            std_val = std_series.iloc[-1]
+            
+            if pd.isna(std_val) or m20 == 0:
+                bw = 0.0
+            else:
+                bw = (std_val * 4) / m20
+                
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
             res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
-        except: res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
+        except:
+            res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
     return res
 
 m_env = get_market_env()
@@ -113,28 +124,27 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     with st.spinner("策略分析中..."):
         for code in codes:
             official_name = stock_name_map.get(code)
-            
-            # 下載個股數據
-            df = yf.download(f"{code}.TW", period="3mo", progress=False)
+            df = yf.download(f"{code}.TW", period="4mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 10:
-                df = yf.download(f"{code}.TWO", period="3mo", progress=False)
+                df = yf.download(f"{code}.TWO", period="4mo", progress=False)
                 m_type = "上櫃"
 
-            if not official_name:
-                official_name = f"台股 {code}"
+            if not official_name: official_name = f"台股 {code}"
 
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                df = df.dropna(subset=['Close'])
                 env = m_env[m_type]
                 df['20MA'] = df['Close'].rolling(20).mean()
                 df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
                 
-                # 確保個股數據也移除 NaN
-                df = df.dropna(subset=['Close'])
                 p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
                 
-                bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / df['20MA'].iloc[-1]
+                # 個股帶寬防 nan 處理
+                std_ind = df['Close'].rolling(20).std().iloc[-1]
+                bw = (std_ind * 4) / df['20MA'].iloc[-1] if not pd.isna(std_ind) else 0.0
+                
                 chg = (p_curr - p_yest) / p_yest
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
