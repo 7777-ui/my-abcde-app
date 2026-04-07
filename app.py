@@ -7,15 +7,19 @@ from datetime import datetime
 import os
 import base64
 import pytz
+from streamlit_autorefresh import st_autorefresh  # 1. 引入自動刷新套件
 
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
+
+# 2. 設定自動刷新：每 300,000 毫秒 (5分鐘) 自動觸發一次，不會導致密碼登出
+st_autorefresh(interval=300000, key="datarefresh")
 
 def set_ui_cleanup(image_file):
     b64_encoded = ""
     if os.path.exists(image_file):
         with open(image_file, "rb") as f:
-            b64_encoded = base64.     b64encode(f.read()).decode()
+            b64_encoded = base64.b64encode(f.read()).decode()
     style = f"""
     <style>
     .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
@@ -46,19 +50,16 @@ if not st.session_state.password_correct:
 @st.cache_data(ttl=604800)
 def get_names_from_local_files():
     mapping = {}
-    # 根據 GitHub 顯示的完整檔名進行對應
     files = ["TWSE.csv", "TPEX.csv"] 
-    
     for f_name in files:
         if os.path.exists(f_name):
             try:
-                # 優先嘗試 utf-8-sig，失敗則嘗試 cp950
                 try:
                     df_local = pd.read_csv(f_name, encoding='utf-8-sig')
                 except:
                     df_local = pd.read_csv(f_name, encoding='cp950')
                 
-                # 抓取邏輯：第一欄為代碼，第二欄為名稱
+                # 抓取邏輯：第一欄為代碼，第三欄(iloc[2])為細分類名稱
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
                     name = str(row.iloc[2]).strip()
@@ -69,22 +70,26 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 ---
+# --- 4. 大盤環境偵測 (修正版：解決 0.00 顯示問題) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for k, v in indices.items():
         try:
-            df = yf.download(v, period="3mo", progress=False)
+            # 抓取近期數據，強制移除 NaN 確保 iloc[-1] 有值
+            df = yf.download(v, period="1mo", progress=False)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            df = df.dropna(subset=['Close'])
+            
             c = df['Close'].iloc[-1]
             m5 = df['Close'].rolling(5).mean().iloc[-1]
             m20 = df['Close'].rolling(20).mean().iloc[-1]
             bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / m20
+            
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
             res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
-        except: res[k] = {"燈號": "⚠️", "價格": 0, "帶寬": 0}
+        except: res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
     return res
 
 m_env = get_market_env()
@@ -107,17 +112,15 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     
     with st.spinner("策略分析中..."):
         for code in codes:
-            # 直接從 CSV 對照表拿名字
             official_name = stock_name_map.get(code)
             
-            # 下載個股數據（用於 ABCDE 判定）
+            # 下載個股數據
             df = yf.download(f"{code}.TW", period="3mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 10:
                 df = yf.download(f"{code}.TWO", period="3mo", progress=False)
                 m_type = "上櫃"
 
-            # 若對照表依然沒抓到（例如剛掛牌的新股），顯示保險名稱
             if not official_name:
                 official_name = f"台股 {code}"
 
@@ -126,7 +129,11 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 env = m_env[m_type]
                 df['20MA'] = df['Close'].rolling(20).mean()
                 df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
+                
+                # 確保個股數據也移除 NaN
+                df = df.dropna(subset=['Close'])
                 p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
+                
                 bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / df['20MA'].iloc[-1]
                 chg = (p_curr - p_yest) / p_yest
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
@@ -150,7 +157,7 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                         if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
 
                 results.append({
-                    "代碼": code, "台股名稱": official_name, "判定結果": res_tag, 
+                    "代碼": code, "族群分類": official_name, "判定結果": res_tag, 
                     "個股帶寬%": f"{bw*100:.2f}%", "漲幅%": f"{chg*100:.2f}%", 
                     "成交值(億)": round(vol_amt, 1), "對比比值": round(ratio, 2)
                 })
