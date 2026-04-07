@@ -11,7 +11,7 @@ from streamlit_autorefresh import st_autorefresh
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-# 設定自動刷新：每 5 分鐘觸發一次內部 Rerun，維持大盤數據更新且不會導致登出
+# 設定自動刷新：每 5 分鐘觸發一次內部 Rerun
 st_autorefresh(interval=300000, key="datarefresh")
 
 def set_ui_cleanup(image_file):
@@ -46,7 +46,6 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# 側邊欄：增加登出按鈕
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
     st.rerun()
@@ -79,24 +78,15 @@ def get_market_env():
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for k, v in indices.items():
         try:
-            # 下載 4 個月數據確保標準差計算穩定
             df = yf.download(v, period="4mo", progress=False)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             df = df.dropna(subset=['Close'])
-            
             c = df['Close'].iloc[-1]
             m5 = df['Close'].rolling(5).mean().iloc[-1]
             m20 = df['Close'].rolling(20).mean().iloc[-1]
-            
-            # 修正 nan% 關鍵：計算標準差並檢查是否有效
             std_series = df['Close'].rolling(20).std()
             std_val = std_series.iloc[-1]
-            
-            if pd.isna(std_val) or m20 == 0:
-                bw = 0.0
-            else:
-                bw = (std_val * 4) / m20
-                
+            bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
             res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
         except:
@@ -140,20 +130,25 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
                 
                 p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                
-                # 個股帶寬防 nan 處理
                 std_ind = df['Close'].rolling(20).std().iloc[-1]
                 bw = (std_ind * 4) / df['20MA'].iloc[-1] if not pd.isna(std_ind) else 0.0
-                
                 chg = (p_curr - p_yest) / p_yest
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
                 slope_pos = df['20MA'].iloc[-1] > df['20MA'].iloc[-2]
                 break_upper = p_curr > df['Upper'].iloc[-1]
                 
-                res_tag = "⚪ 未達准入"
-                if break_upper and slope_pos and vol_amt >= 5:
+                # --- 新增：判定原因邏輯 ---
+                res_tag = ""
+                fail_reasons = []
+
+                if not break_upper: fail_reasons.append("未站上布林上軌")
+                if not slope_pos: fail_reasons.append("20MA 斜率向下")
+                if vol_amt < 5: fail_reasons.append(f"量能不足({vol_amt:.1f}億)")
+
+                if not fail_reasons:
                     env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
+                    # 判定邏輯
                     if "🟢" in env['燈號']:
                         if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：帶寬共振】"
                         elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額擴張】"
@@ -165,6 +160,11 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                         elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍狙擊】"
                     elif "🔴" in env['燈號']:
                         if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍爆發】"
+                    
+                    if not res_tag:
+                        res_tag = f"⚪ 參數不符(漲幅{chg*100:.1f}%/帶寬{bw*100:.1f}%)"
+                else:
+                    res_tag = "⚪ " + " / ".join(fail_reasons)
 
                 results.append({
                     "代碼": code, "族群分類": official_name, "判定結果": res_tag, 
