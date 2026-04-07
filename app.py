@@ -69,25 +69,43 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 ---
-@st.cache_data(ttl=300)
+# --- 4. 大盤環境偵測 (修正版) ---
+@st.cache_data(ttl=300) # 每 5 分鐘允許更新一次
 def get_market_env():
     res = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for k, v in indices.items():
         try:
-            df = yf.download(v, period="3mo", progress=False)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            c = df['Close'].iloc[-1]
-            m5 = df['Close'].rolling(5).mean().iloc[-1]
-            m20 = df['Close'].rolling(20).mean().iloc[-1]
-            bw = (df['Close'].rolling(20).std().iloc[-1] * 4) / m20
+            # 增加下載的天數確保有足夠數據計算 20MA
+            df = yf.download(v, period="5d", interval="1m", progress=False) 
+            if df.empty:
+                # 如果分時數據抓不到，改抓日線
+                df = yf.download(v, period="1mo", progress=False)
+            
+            if isinstance(df.columns, pd.MultiIndex): 
+                df.columns = df.columns.get_level_values(0)
+            
+            # 關鍵修正：移除 NaN 掉的列，並取最後一個有效數值
+            df = df.dropna(subset=['Close'])
+            
+            c = float(df['Close'].iloc[-1])
+            # 計算 5MA 與 20MA (這裡需要較長天數數據)
+            df_daily = yf.download(v, period="3mo", progress=False)
+            if isinstance(df_daily.columns, pd.MultiIndex): 
+                df_daily.columns = df_daily.columns.get_level_values(0)
+            
+            m5 = df_daily['Close'].rolling(5).mean().iloc[-1]
+            m20 = df_daily['Close'].rolling(20).mean().iloc[-1]
+            std20 = df_daily['Close'].rolling(20).std().iloc[-1]
+            
+            bw = (std20 * 4) / m20
+            
+            # 燈號判定邏輯
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
-        except: res[k] = {"燈號": "⚠️", "價格": 0, "帶寬": 0}
+            res[k] = {"燈號": light, "價格": c, "帶寬": float(bw)}
+        except Exception as e:
+            res[k] = {"燈號": "⚠️ 錯誤", "價格": 0.0, "帶寬": 0.0}
     return res
-
-m_env = get_market_env()
 
 # --- 5. 主畫面與策略判定 ---
 st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
