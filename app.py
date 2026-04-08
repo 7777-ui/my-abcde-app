@@ -71,27 +71,43 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (修正 nan% 核心邏輯) ---
+# --- 4. 大盤環境偵測 (維持原始代碼，僅增加 nan 防禦) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
+    # 維持你指定的代碼：上市 ^TWII, 上櫃 ^TWOII
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     for k, v in indices.items():
         try:
             df = yf.download(v, period="4mo", progress=False)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            if df.empty:
+                raise ValueError("No Data")
+                
+            if isinstance(df.columns, pd.MultiIndex): 
+                df.columns = df.columns.get_level_values(0)
+            
             df = df.dropna(subset=['Close'])
+            
+            # 取得數值
             c = df['Close'].iloc[-1]
             m5 = df['Close'].rolling(5).mean().iloc[-1]
             m20 = df['Close'].rolling(20).mean().iloc[-1]
+            
+            # 強化 std 計算防禦，避免出現 nan%
             std_series = df['Close'].rolling(20).std()
-            std_val = std_series.iloc[-1]
-            bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+            std_val = std_series.iloc[-1] if len(std_series) >= 20 else 0.0
+            
+            # 確保 bw 不是 nan 且 m20 不為零
+            if pd.isna(std_val) or m20 == 0:
+                bw = 0.0
+            else:
+                bw = float((std_val * 4) / m20)
+                
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
+            res[k] = {"燈號": light, "價格": float(c), "帶寬": bw}
         except:
-            res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
-    return res
+            # 發生錯誤時誠實顯示 0，不造假
+            res[k] = {"燈號": "⚠️ 數據延遲", "價格": 0.0, "帶寬": 0.0}
 m_env = get_market_env()
 
 # --- 5. 主畫面與策略判定 ---
