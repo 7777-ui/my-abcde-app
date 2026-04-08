@@ -71,55 +71,26 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (強效爬蟲版：直接抓網頁數字，不打轉) ---
+# --- 4. 大盤環境偵測 (修正 nan% 核心邏輯) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 上市用 yfinance (通常很準)，上櫃我們直接去網頁抓
-    # 1. 處理上市 (^TWII)
-    try:
-        twse = yf.download("^TWII", period="6mo", progress=False)
-        if isinstance(twse.columns, pd.MultiIndex): twse.columns = twse.columns.get_level_values(0)
-        c_t = float(twse['Close'].iloc[-1])
-        m5_t = float(twse['Close'].rolling(5).mean().iloc[-1])
-        m20_t = float(twse['Close'].rolling(20).mean().iloc[-1])
-        std_t = twse['Close'].rolling(20).std().iloc[-1]
-        bw_t = (std_t * 4) / m20_t
-        res["上市"] = {"燈號": ("🟢 綠燈" if c_t > m5_t else "🟡 黃燈" if c_t > m20_t else "🔴 紅燈"), "價格": c_t, "帶寬": bw_t}
-    except:
-        res["上市"] = {"燈號": "⚠️ 異常", "價格": 0.0, "帶寬": 0.0}
-
-    # 2. 處理上櫃 (直接從 Yahoo 網頁抓正確的 340.x)
-    try:
-        # 抓取 Yahoo 股市 OTC 頁面
-        url = "https://tw.stock.yahoo.com/quote/%5ETPEX"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # 使用正規表達式直接從網頁原始碼撈數字
-        # 抓取最新價格
-        price_match = re.search(r'"price":"(\d+\.\d+)"', response.text)
-        # 抓取漲跌幅 (計算燈號參考用)
-        price_val = float(price_match.group(1)) if price_match else 340.6 # 若抓不到則保底
-
-        # 為了計算帶寬，我們還是需要歷史數據，但價格我們強制修正為網頁抓到的最新值
-        otc_hist = yf.download("OTC.TWO", period="6mo", progress=False)
-        if isinstance(otc_hist.columns, pd.MultiIndex): otc_hist.columns = otc_hist.columns.get_level_values(0)
-        
-        # 強制修正最後一筆價格為網頁抓到的即時價
-        df_otc = otc_hist.copy()
-        df_otc.iloc[-1, df_otc.columns.get_loc('Close')] = price_val
-        
-        c_o = price_val
-        m5_o = float(df_otc['Close'].rolling(5).mean().iloc[-1])
-        m20_o = float(df_otc['Close'].rolling(20).mean().iloc[-1])
-        std_o = df_otc['Close'].rolling(20).std().iloc[-1]
-        bw_o = (std_o * 4) / m20_o
-        
-        res["上櫃"] = {"燈號": ("🟢 綠燈" if c_o > m5_o else "🟡 黃燈" if c_o > m20_o else "🔴 紅燈"), "價格": c_o, "帶寬": bw_o}
-    except Exception as e:
-        res["上櫃"] = {"燈號": "⚠️ 網頁抓取失敗", "價格": 340.6, "帶寬": 0.13} # 真的不行就給正確的基準值
-
+    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
+    for k, v in indices.items():
+        try:
+            df = yf.download(v, period="4mo", progress=False)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            df = df.dropna(subset=['Close'])
+            c = df['Close'].iloc[-1]
+            m5 = df['Close'].rolling(5).mean().iloc[-1]
+            m20 = df['Close'].rolling(20).mean().iloc[-1]
+            std_series = df['Close'].rolling(20).std()
+            std_val = std_series.iloc[-1]
+            bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+            light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
+            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
+        except:
+            res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
     return res
 m_env = get_market_env()
 
