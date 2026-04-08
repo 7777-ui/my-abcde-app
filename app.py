@@ -71,48 +71,54 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (雙重備援版：解決 0.00 與 nan 問題) ---
+# --- 4. 大盤環境偵測 (終極強韌版：三重備援機制) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 主力代碼設定
-    indices_map = {"上市": "^TWII", "上櫃": "^TPEX"}
-    # 備援代碼設定 (如果主代碼失效)
-    backup_map = {"上市": "000001.SS", "上櫃": "OTC.TWO"} 
+    # 定義每個指數的優先嘗試清單
+    target_indices = {
+        "上市": ["^TWII", "000001.SS"], 
+        "上櫃": ["OTC.TWO", "000620.TWO", "^TPEX"]  # OTC.TWO 通常最穩定
+    }
 
-    for k, v in indices_map.items():
+    for k, v_list in target_indices.items():
+        df = pd.DataFrame()
+        success_code = ""
+        
+        # 依序嘗試清單中的代碼
+        for code in v_list:
+            try:
+                temp_df = yf.download(code, period="5mo", progress=False)
+                if not temp_df.empty and len(temp_df) >= 20:
+                    df = temp_df
+                    success_code = code
+                    break # 抓到數據了，跳出嘗試循環
+            except:
+                continue
+        
         try:
-            # 第一跳：嘗試抓取主代碼
-            df = yf.download(v, period="5mo", progress=False)
-            
-            # 如果抓不到數據，嘗試備援代碼
-            if df.empty or len(df) < 20:
-                df = yf.download(backup_map[k], period="5mo", progress=False)
-
-            if isinstance(df.columns, pd.MultiIndex): 
-                df.columns = df.columns.get_level_values(0)
-            
-            df = df.dropna(subset=['Close'])
-            
-            if not df.empty and len(df) >= 20:
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex): 
+                    df.columns = df.columns.get_level_values(0)
+                
+                df = df.dropna(subset=['Close'])
                 c = df['Close'].iloc[-1]
                 m5 = df['Close'].rolling(5).mean().iloc[-1]
                 m20 = df['Close'].rolling(20).mean().iloc[-1]
                 std_val = df['Close'].rolling(20).std().iloc[-1]
                 
-                # 防 nan 處理
+                # 計算帶寬，並確保不是 nan
                 bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
-                light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
                 
+                # 燈號邏輯
+                light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
                 res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
             else:
-                raise ValueError("數據長度不足")
-                
+                res[k] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
         except:
-            res[k] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
+            res[k] = {"燈號": "⚠️ 計算錯誤", "價格": 0.0, "帶寬": 0.0}
             
     return res
-
 m_env = get_market_env()
 
 # --- 5. 主畫面與策略判定 ---
