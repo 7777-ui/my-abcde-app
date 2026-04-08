@@ -78,7 +78,7 @@ def get_market_env():
     # 嘗試最穩定的代碼組合
     indices_config = {
         "上市": ["^TWII", "000001.SS"],
-        "上櫃": ["^TWOII", "OTC.TWO", "^TPEX"] 
+        "上櫃": ["OTC.TWO", "^TWOII", "^TPEX"] 
     }
 
     for k, v_list in indices_config.items():
