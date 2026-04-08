@@ -108,7 +108,7 @@ def get_market_env():
         except:
             # 發生錯誤時誠實顯示 0，不造假
             res[k] = {"燈號": "⚠️ 數據延遲", "價格": 0.0, "帶寬": 0.0}
-            return res
+    return res
 m_env = get_market_env()
 
 # --- 5. 主畫面與策略判定 ---
