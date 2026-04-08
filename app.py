@@ -75,7 +75,7 @@ stock_name_map = get_names_from_local_files()
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
+    indices = {"上市": "^TWII", "上櫃": "^TPEX"}
     for k, v in indices.items():
         try:
             df = yf.download(v, period="4mo", progress=False)
