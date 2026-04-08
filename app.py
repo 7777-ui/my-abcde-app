@@ -71,60 +71,26 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (多源官方數據版：拒絕造假) ---
+# --- 4. 大盤環境偵測 (修正 nan% 核心邏輯) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 1. 上市維持 yfinance (目前 ^TWII 是準確的)
-    try:
-        twse = yf.download("^TWII", period="6mo", progress=False)
-        if isinstance(twse.columns, pd.MultiIndex): twse.columns = twse.columns.get_level_values(0)
-        c_t = float(twse['Close'].iloc[-1])
-        m5_t = twse['Close'].rolling(5).mean().iloc[-1]
-        m20_t = twse['Close'].rolling(20).mean().iloc[-1]
-        std_t = twse['Close'].rolling(20).std().iloc[-1]
-        bw_t = (std_t * 4) / m20_t
-        res["上市"] = {"燈號": "🟢 綠燈" if c_t > m5_t else "🔴 紅燈", "價格": c_t, "帶寬": bw_t}
-    except:
-        res["上市"] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
-
-    # 2. 上櫃：使用 Stooq 引擎抓取真實官方點數 (代碼 ^TWO)
-    try:
-        # Stooq 的代碼通常是 ^TWO 或使用特定格式
-        # 我們強制要求抓取最新日線數據
-        import pandas_datareader.data as web
-        df_otc = web.DataReader('^TWO', 'stooq') # 這是國際公認的上櫃指數官方映射
-        
-        # 確保資料由舊到新排序
-        df_otc = df_otc.sort_index()
-        
-        if not df_otc.empty:
-            c_o = float(df_otc['Close'].iloc[-1])
-            # 計算 20MA 與 帶寬
-            m5_o = df_otc['Close'].rolling(5).mean().iloc[-1]
-            m20_o = df_otc['Close'].rolling(20).mean().iloc[-1]
-            std_o = df_otc['Close'].rolling(20).std().iloc[-1]
-            bw_o = (std_o * 4) / m20_o
-            
-            res["上櫃"] = {
-                "燈號": "🟢 綠燈" if c_o > m5_o else ("🟡 黃燈" if c_o > m20_o else "🔴 紅燈"),
-                "價格": c_o, 
-                "帶寬": bw_o
-            }
-        else:
-            raise ValueError
-    except:
-        # 若 Stooq 也失敗，最後嘗試 yfinance 的官方修正路徑 000620.TWO
+    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
+    for k, v in indices.items():
         try:
-            otc_yf = yf.download("000620.TWO", period="6mo", progress=False)
-            if isinstance(otc_yf.columns, pd.MultiIndex): otc_yf.columns = otc_yf.columns.get_level_values(0)
-            c_o = float(otc_yf['Close'].iloc[-1])
-            m20_o = otc_yf['Close'].rolling(20).mean().iloc[-1]
-            bw_o = (otc_yf['Close'].rolling(20).std().iloc[-1] * 4) / m20_o
-            res["上櫃"] = {"燈號": "🟢 綠燈" if c_o > otc_yf['Close'].rolling(5).mean().iloc[-1] else "🔴 紅燈", "價格": c_o, "帶寬": bw_o}
+            df = yf.download(v, period="4mo", progress=False)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            df = df.dropna(subset=['Close'])
+            c = df['Close'].iloc[-1]
+            m5 = df['Close'].rolling(5).mean().iloc[-1]
+            m20 = df['Close'].rolling(20).mean().iloc[-1]
+            std_series = df['Close'].rolling(20).std()
+            std_val = std_series.iloc[-1]
+            bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+            light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
+            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
         except:
-            res["上櫃"] = {"燈號": "⚠️ 官方API全數失效", "價格": 0.0, "帶寬": 0.0}
-
+            res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
     return res
 m_env = get_market_env()
 
