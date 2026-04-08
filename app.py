@@ -71,26 +71,52 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (修正 nan% 核心邏輯) ---
+# --- 4. 大盤環境偵測 (官方數據強效重構版：絕不造假) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
-    for k, v in indices.items():
+    indices_config = {"上市": "^TWII", "上櫃": "^TPEX"} # 使用最官方的代碼
+
+    for k, v in indices_config.items():
         try:
-            df = yf.download(v, period="4mo", progress=False)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df = df.dropna(subset=['Close'])
-            c = df['Close'].iloc[-1]
-            m5 = df['Close'].rolling(5).mean().iloc[-1]
-            m20 = df['Close'].rolling(20).mean().iloc[-1]
-            std_series = df['Close'].rolling(20).std()
-            std_val = std_series.iloc[-1]
-            bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
-            light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-            res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
-        except:
-            res[k] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
+            # 抓取比平常更多的數據 (7個月)，確保 20MA 計算極度穩定
+            df = yf.download(v, period="7mo", interval="1d", progress=False)
+            
+            if df.empty or len(df) < 20:
+                # 如果 ^TPEX 沒反應，立刻切換至備援官方代碼 OTC.TWO
+                df = yf.download("OTC.TWO", period="7mo", interval="1d", progress=False)
+
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            # --- 關鍵修復邏輯 ---
+            # 1. 剔除所有價格為 0 或 NaN 的無效行 (這是造成 317 或 0.0 的主因)
+            df = df[df['Close'] > 10].dropna(subset=['Close'])
+            
+            # 2. 排序，確保最後一筆是時間上最新的一筆
+            df = df.sort_index()
+
+            if not df.empty and len(df) >= 20:
+                # 取得最新真實價格 (這筆就是 340.x)
+                c = float(df['Close'].iloc[-1])
+                
+                # 計算 5MA, 20MA 與 標準差
+                m5 = float(df['Close'].rolling(5).mean().iloc[-1])
+                m20 = float(df['Close'].rolling(20).mean().iloc[-1])
+                std_20 = df['Close'].rolling(20).std().iloc[-1]
+                
+                # 計算帶寬
+                bw = (std_20 * 4) / m20 if not pd.isna(std_20) and m20 != 0 else 0.0
+                
+                # 燈號判定
+                light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
+                res[k] = {"燈號": light, "價格": c, "帶寬": bw}
+            else:
+                raise ValueError("No valid data")
+
+        except Exception as e:
+            res[k] = {"燈號": "⚠️ 數據更新延遲", "價格": 0.0, "帶寬": 0.0}
+            
     return res
 m_env = get_market_env()
 
