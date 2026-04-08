@@ -71,25 +71,27 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (終極強韌版：確保不跳 0.00) ---
+# --- 4. 大盤環境偵測 (修正 OTC 指數落差版本) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 嘗試最穩定的代碼組合
-    indices_config = {
-        "上市": ["^TWII", "000001.SS"],
-        "上櫃": ["^TWOII", "OTC.TWO", "^TPEX"] 
+    # 設定最優先抓取的代碼：000620.TWO 是目前 Yahoo Finance 最準的上櫃指數代碼
+    target_indices = {
+        "上市": ["^TWII"], 
+        "上櫃": ["000620.TWO", "^TPEX", "OTC.TWO"] 
     }
 
-    for k, v_list in indices_config.items():
+    for k, v_list in target_indices.items():
         df = pd.DataFrame()
         for code in v_list:
             try:
-                # 抓取 6 個月數據確保 20MA 計算不會出現 nan
-                temp_df = yf.download(code, period="6mo", progress=False)
+                # 抓取 5 個月數據，並強制要求最新
+                temp_df = yf.download(code, period="5mo", progress=False)
                 if not temp_df.empty and len(temp_df) >= 20:
-                    df = temp_df
-                    break
+                    # 檢查最後一筆收盤價，如果是 0 或是異常低值就跳過換下一個代碼
+                    if temp_df['Close'].iloc[-1] > 10: 
+                        df = temp_df
+                        break
             except:
                 continue
         
@@ -104,16 +106,14 @@ def get_market_env():
                 m20 = float(df['Close'].rolling(20).mean().iloc[-1])
                 std_20 = df['Close'].rolling(20).std().iloc[-1]
                 
-                # 強制防呆：如果標準差計算失敗 (nan)，給予 0.01 避免崩潰
-                bw = (std_20 * 4) / m20 if not pd.isna(std_20) and m20 != 0 else 0.05
+                bw = (std_20 * 4) / m20 if not pd.isna(std_20) and m20 != 0 else 0.0
                 
                 light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
                 res[k] = {"燈號": light, "價格": c, "帶寬": bw}
             else:
-                # 如果真的都抓不到，給一個保底數值，不要讓畫面顯示異常
-                res[k] = {"燈號": "⚠️ 數據源重載中", "價格": 0.01, "帶寬": 0.08}
+                res[k] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
         except:
-            res[k] = {"燈號": "⚠️ 讀取失敗", "價格": 0.01, "帶寬": 0.08}
+            res[k] = {"燈號": "⚠️ 讀取失敗", "價格": 0.0, "帶寬": 0.0}
             
     return res
 m_env = get_market_env()
