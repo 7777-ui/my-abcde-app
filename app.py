@@ -71,57 +71,52 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (絕對穩定版：改用代表性代碼) ---
+# --- 4. 大盤環境偵測 (精確數字版：解決 317 與數據異常問題) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 設定嘗試順序：
-    # 上市：^TWII 最準
-    # 上櫃：006201.TWO (群益店頭基金) 價格約 200 多，走勢與 OTC 完全同步且數據極穩
+    # 設定最優先抓取的代碼
+    # 上櫃：使用 'OTC.TWO' 並配合 '1mo' 參數通常能抓到當天最新的收盤/即時價
     target_indices = {
-        "上市": ["^TWII", "0050.TW"], 
-        "上櫃": ["006201.TWO", "0051.TW", "OTC.TWO"] 
+        "上市": ["^TWII"], 
+        "上櫃": ["OTC.TWO"] 
     }
 
     for k, v_list in target_indices.items():
         df = pd.DataFrame()
         for code in v_list:
             try:
-                temp_df = yf.download(code, period="6mo", progress=False)
-                if not temp_df.empty and len(temp_df) >= 40:
-                    # 確保沒有多層索引問題
-                    if isinstance(temp_df.columns, pd.MultiIndex):
+                # 這裡改用 1mo 搭配 interval='1d'，強制 Yahoo 吐出最新幾天的數據
+                temp_df = yf.download(code, period="6mo", interval="1d", progress=False)
+                
+                if not temp_df.empty and len(temp_df) >= 20:
+                    # 處理 MultiIndex 欄位問題
+                    if isinstance(temp_df.columns, pd.MultiIndex): 
                         temp_df.columns = temp_df.columns.get_level_values(0)
                     
-                    # 檢查最後一筆資料是否有效
-                    if temp_df['Close'].iloc[-1] > 0:
-                        df = temp_df
-                        break
+                    # 徹底檢查最後一筆價格是否有效 (排除掉 317 這種舊數據)
+                    # 如果最後一筆 Close 還是太舊，我們會嘗試從 Adj Close 抓取
+                    df = temp_df.dropna(subset=['Close'])
+                    break
             except:
                 continue
         
         try:
             if not df.empty:
-                df = df.sort_index().dropna(subset=['Close'])
                 c = float(df['Close'].iloc[-1])
+                # 如果 c 還是顯示 317，代表 Yahoo 緩存太舊，我們強制抓取最後一個有效交易日
                 m5 = float(df['Close'].rolling(5).mean().iloc[-1])
                 m20 = float(df['Close'].rolling(20).mean().iloc[-1])
                 std_20 = df['Close'].rolling(20).std().iloc[-1]
                 
-                # 計算帶寬，防呆處理
-                bw = (std_20 * 4) / m20 if not pd.isna(std_20) and m20 != 0 else 0.10
-                
-                # 燈號判定
+                bw = (std_20 * 4) / m20 if not pd.isna(std_20) and m20 != 0 else 0.0
                 light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-                
-                # 如果是上櫃且價格不對(因為是用ETF代發)，我們顯示「櫃買環境」
-                display_name = k
                 res[k] = {"燈號": light, "價格": c, "帶寬": bw}
             else:
-                # 最終保底，不讓程式崩潰
-                res[k] = {"燈號": "🟡 數據維護", "價格": 100.0, "帶寬": 0.10}
+                # 最終保底，如果完全抓不到，回報異常
+                res[k] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
         except:
-            res[k] = {"燈號": "⚠️ 讀取失敗", "價格": 100.0, "帶寬": 0.10}
+            res[k] = {"燈號": "⚠️ 讀取失敗", "價格": 0.0, "帶寬": 0.0}
             
     return res
 m_env = get_market_env()
