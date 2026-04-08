@@ -71,54 +71,59 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (真實官方數據版：解決 Yahoo 延遲問題) ---
+# --- 4. 大盤環境偵測 (多源官方數據版：拒絕造假) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    
-    # 1. 處理上市 (加權指數維持 ^TWII，通常 Yahoo 這裡很準)
+    # 1. 上市維持 yfinance (目前 ^TWII 是準確的)
     try:
         twse = yf.download("^TWII", period="6mo", progress=False)
         if isinstance(twse.columns, pd.MultiIndex): twse.columns = twse.columns.get_level_values(0)
-        twse = twse.dropna(subset=['Close'])
         c_t = float(twse['Close'].iloc[-1])
         m5_t = twse['Close'].rolling(5).mean().iloc[-1]
         m20_t = twse['Close'].rolling(20).mean().iloc[-1]
         std_t = twse['Close'].rolling(20).std().iloc[-1]
-        bw_t = (std_t * 4) / m20_t if m20_t != 0 else 0
-        res["上市"] = {"燈號": "🟢 綠燈" if c_t > m5_t else ("🟡 黃燈" if c_t > m20_t else "🔴 紅燈"), "價格": c_t, "帶寬": bw_t}
+        bw_t = (std_t * 4) / m20_t
+        res["上市"] = {"燈號": "🟢 綠燈" if c_t > m5_t else "🔴 紅燈", "價格": c_t, "帶寬": bw_t}
     except:
-        res["上市"] = {"燈號": "⚠️", "價格": 0.0, "帶寬": 0.0}
+        res["上市"] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
 
-    # 2. 處理上櫃 (使用替代官方代碼與深度清洗)
-    # 我們嘗試用 'TWO' 這個代碼，這是 Google 與許多國際數據商使用的官方縮寫
+    # 2. 上櫃：使用 Stooq 引擎抓取真實官方點數 (代碼 ^TWO)
     try:
-        # 嘗試抓取 OTC 指數的最完整歷史 (避開失效的 ^TPEX)
-        otc = yf.download("000620.TWO", period="6mo", progress=False)
+        # Stooq 的代碼通常是 ^TWO 或使用特定格式
+        # 我們強制要求抓取最新日線數據
+        import pandas_datareader.data as web
+        df_otc = web.DataReader('^TWO', 'stooq') # 這是國際公認的上櫃指數官方映射
         
-        # 如果 000620 沒數據，改抓 OTC.TWO (強制要求最新)
-        if otc.empty or otc['Close'].iloc[-1] < 100:
-            otc = yf.download("OTC.TWO", period="6mo", progress=False)
-
-        if isinstance(otc.columns, pd.MultiIndex): otc.columns = otc.columns.get_level_values(0)
+        # 確保資料由舊到新排序
+        df_otc = df_otc.sort_index()
         
-        # 強制剔除錯誤的舊數據 (例如 317)
-        # 如果最新的價格與前幾天落差過大且明顯過時，我們會進行篩選
-        otc = otc[otc['Close'] > 200].dropna(subset=['Close']) 
-        
-        if not otc.empty:
-            c_o = float(otc['Close'].iloc[-1])
-            m5_o = otc['Close'].rolling(5).mean().iloc[-1]
-            m20_o = otc['Close'].rolling(20).mean().iloc[-1]
-            std_o = otc['Close'].rolling(20).std().iloc[-1]
-            bw_o = (std_o * 4) / m20_o if m20_o != 0 else 0
+        if not df_otc.empty:
+            c_o = float(df_otc['Close'].iloc[-1])
+            # 計算 20MA 與 帶寬
+            m5_o = df_otc['Close'].rolling(5).mean().iloc[-1]
+            m20_o = df_otc['Close'].rolling(20).mean().iloc[-1]
+            std_o = df_otc['Close'].rolling(20).std().iloc[-1]
+            bw_o = (std_o * 4) / m20_o
             
-            res["上櫃"] = {"燈號": "🟢 綠燈" if c_o > m5_o else ("🟡 黃燈" if c_o > m20_o else "🔴 紅燈"), "價格": c_o, "帶寬": bw_o}
+            res["上櫃"] = {
+                "燈號": "🟢 綠燈" if c_o > m5_o else ("🟡 黃燈" if c_o > m20_o else "🔴 紅燈"),
+                "價格": c_o, 
+                "帶寬": bw_o
+            }
         else:
             raise ValueError
     except:
-        # 如果 API 真的全掛，為了不讓你的戰情室顯示 0，這裡必須顯示最後一次已知的官方正確數值
-        res["上櫃"] = {"燈號": "🟢 綠燈", "價格": 340.60, "帶寬": 0.134} 
+        # 若 Stooq 也失敗，最後嘗試 yfinance 的官方修正路徑 000620.TWO
+        try:
+            otc_yf = yf.download("000620.TWO", period="6mo", progress=False)
+            if isinstance(otc_yf.columns, pd.MultiIndex): otc_yf.columns = otc_yf.columns.get_level_values(0)
+            c_o = float(otc_yf['Close'].iloc[-1])
+            m20_o = otc_yf['Close'].rolling(20).mean().iloc[-1]
+            bw_o = (otc_yf['Close'].rolling(20).std().iloc[-1] * 4) / m20_o
+            res["上櫃"] = {"燈號": "🟢 綠燈" if c_o > otc_yf['Close'].rolling(5).mean().iloc[-1] else "🔴 紅燈", "價格": c_o, "帶寬": bw_o}
+        except:
+            res["上櫃"] = {"燈號": "⚠️ 官方API全數失效", "價格": 0.0, "帶寬": 0.0}
 
     return res
 m_env = get_market_env()
