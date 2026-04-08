@@ -71,52 +71,57 @@ def get_names_from_local_files():
 
 stock_name_map = get_names_from_local_files()
 
-# --- 4. 大盤環境偵測 (終極強韌版：三重備援機制) ---
+# --- 4. 大盤環境偵測 (終極強韌版：解決 0.00 與 nan 問題) ---
 @st.cache_data(ttl=300)
 def get_market_env():
     res = {}
-    # 定義每個指數的優先嘗試清單
+    # 設定嘗試順序：上櫃優先嘗試 ^TPEX，不行再換 OTC.TWO
     target_indices = {
         "上市": ["^TWII", "000001.SS"], 
-        "上櫃": ["OTC.TWO", "000620.TWO", "^TPEX"]  # OTC.TWO 通常最穩定
+        "上櫃": ["^TPEX", "OTC.TWO", "000620.TWO"] 
     }
 
     for k, v_list in target_indices.items():
         df = pd.DataFrame()
-        success_code = ""
         
-        # 依序嘗試清單中的代碼
         for code in v_list:
             try:
-                temp_df = yf.download(code, period="5mo", progress=False)
-                if not temp_df.empty and len(temp_df) >= 20:
+                # 抓取 6 個月數據確保標準差計算有足夠樣本，避免 nan
+                temp_df = yf.download(code, period="6mo", progress=False)
+                if not temp_df.empty and len(temp_df) >= 40:
                     df = temp_df
-                    success_code = code
-                    break # 抓到數據了，跳出嘗試循環
+                    break 
             except:
                 continue
         
         try:
             if not df.empty:
+                # 處理 MultiIndex 欄位問題
                 if isinstance(df.columns, pd.MultiIndex): 
                     df.columns = df.columns.get_level_values(0)
                 
-                df = df.dropna(subset=['Close'])
-                c = df['Close'].iloc[-1]
-                m5 = df['Close'].rolling(5).mean().iloc[-1]
-                m20 = df['Close'].rolling(20).mean().iloc[-1]
-                std_val = df['Close'].rolling(20).std().iloc[-1]
+                # 徹底清洗數據
+                df = df.sort_index().dropna(subset=['Close'])
                 
-                # 計算帶寬，並確保不是 nan
-                bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+                # 取得最新價格與均線
+                c = float(df['Close'].iloc[-1])
+                m5 = float(df['Close'].rolling(5).mean().iloc[-1])
+                m20 = float(df['Close'].rolling(20).mean().iloc[-1])
                 
-                # 燈號邏輯
+                # 計算帶寬：使用更穩定的計算方式
+                std_20 = df['Close'].rolling(20).std().iloc[-1]
+                
+                if pd.isna(std_20) or m20 == 0:
+                    bw = 0.0
+                else:
+                    bw = (std_20 * 4) / m20
+                
                 light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-                res[k] = {"燈號": light, "價格": float(c), "帶寬": float(bw)}
+                res[k] = {"燈號": light, "價格": c, "帶寬": bw}
             else:
                 res[k] = {"燈號": "⚠️ 數據源異常", "價格": 0.0, "帶寬": 0.0}
-        except:
-            res[k] = {"燈號": "⚠️ 計算錯誤", "價格": 0.0, "帶寬": 0.0}
+        except Exception as e:
+            res[k] = {"燈號": f"⚠️ 讀取失敗", "價格": 0.0, "帶寬": 0.0}
             
     return res
 m_env = get_market_env()
