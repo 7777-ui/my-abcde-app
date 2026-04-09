@@ -41,7 +41,7 @@ def set_ui_cleanup(image_file):
         padding: 15px; 
         border-radius: 12px; 
         backdrop-filter: blur(10px); 
-        margin-top: -10px; /* 稍微往上拉一點 */
+        margin-top: -10px; 
     }}
     
     /* 表格背景強化 */
@@ -65,7 +65,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 深度讀取 (1-6 欄位) ---
+# --- 3. 🛡️ 族群 CSV 深度讀取 (修正 nan 問題) ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -77,6 +77,9 @@ def get_stock_info_full():
                     df_local = pd.read_csv(f_name, encoding='utf-8-sig')
                 except:
                     df_local = pd.read_csv(f_name, encoding='cp950')
+                
+                # 重點修正：將所有空值填充為 "-"，避免顯示 nan
+                df_local = df_local.fillna('-')
                 
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
@@ -182,10 +185,10 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 results.append({
                     "代號": code,
                     "名稱": info["簡稱"],
-                    "判定結果": res_tag,
+                    "策略": res_tag,
                     "漲幅%": f"{chg*100:.1f}%",
                     "成交值(億)": round(vol_amt, 1),
-                    "個股帶寬%": f"{bw*100:.2f}%",
+                    "個股帶寬%": f"{bw*100:.1f}%",
                     "比值": round(ratio, 2),
                     "產業排位": info["產業排位"],
                     "2026指標": info["實力指標"],
