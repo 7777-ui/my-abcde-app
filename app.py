@@ -20,14 +20,31 @@ def set_ui_cleanup(image_file):
             b64_encoded = base64.b64encode(f.read()).decode()
     style = f"""
     <style>
+    /* 背景設置 */
     .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
     .stApp::before {{ content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.7); z-index: -1; }}
     
-    /* 修正 1：保留 Header 確保側欄開啟鈕可見，僅隱藏不必要的 UI */
-    [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], footer, #MainMenu {{ display: none !important; }}
-    header {{ background: transparent !important; }} 
+    /* 修正頂部空白：強制主容器與頂部對齊 */
+    [data-testid="stAppViewMain"] > div:first-child {{ padding-top: 0rem !important; }}
+    .stMainBlockContainer {{ padding-top: 1.5rem !important; padding-bottom: 1rem !important; }}
     
-    div[data-testid="stHorizontalBlock"] {{ position: sticky; top: 0px; z-index: 1000; background-color: rgba(30, 30, 30, 0.6); padding: 15px; border-radius: 12px; backdrop-filter: blur(10px); }}
+    /* 隱藏不必要的 UI 元素，保留 Header 開啟鈕 */
+    [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], footer, #MainMenu {{ display: none !important; }}
+    header {{ background: transparent !important; height: 3rem !important; }} 
+    
+    /* 大盤戰情區塊：半透明模糊效果 */
+    div[data-testid="stHorizontalBlock"] {{ 
+        position: sticky; 
+        top: 0px; 
+        z-index: 1000; 
+        background-color: rgba(30, 30, 30, 0.6); 
+        padding: 15px; 
+        border-radius: 12px; 
+        backdrop-filter: blur(10px); 
+        margin-top: -10px; /* 稍微往上拉一點 */
+    }}
+    
+    /* 表格背景強化 */
     .stDataFrame {{ background-color: rgba(20, 20, 20, 0.8) !important; border-radius: 10px; padding: 5px; }}
     </style>
     """
@@ -162,14 +179,13 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 else:
                     res_tag = "⚪ " + "/".join(fail_reasons)
 
-                # 組合 11 個欄位
                 results.append({
                     "代號": code,
                     "名稱": info["簡稱"],
                     "判定結果": res_tag,
                     "漲幅%": f"{chg*100:.1f}%",
                     "成交值(億)": round(vol_amt, 1),
-                    "個股帶寬%": f"{bw*100:.1f}%",
+                    "個股帶寬%": f"{bw*100:.2f}%",
                     "比值": round(ratio, 2),
                     "產業排位": info["產業排位"],
                     "2026指標": info["實力指標"],
