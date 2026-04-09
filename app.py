@@ -28,7 +28,7 @@ def set_ui_cleanup(image_file):
     [data-testid="stAppViewMain"] > div:first-child {{ padding-top: 0rem !important; }}
     .stMainBlockContainer {{ padding-top: 1.5rem !important; padding-bottom: 1rem !important; }}
     
-    /* 隱藏不必要的 UI 元素，保留 Header 開啟鈕 */
+    /* 隱藏不必要的 UI 元素 */
     [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], footer, #MainMenu {{ display: none !important; }}
     header {{ background: transparent !important; height: 3rem !important; }} 
     
@@ -78,7 +78,6 @@ def get_stock_info_full():
                 except:
                     df_local = pd.read_csv(f_name, encoding='cp950')
                 
-                # 重點修正：將所有空值填充為 "-"，避免顯示 nan
                 df_local = df_local.fillna('-')
                 
                 for _, row in df_local.iterrows():
@@ -114,7 +113,7 @@ def get_market_env():
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
             res[k] = {"燈號": light, "價格": float(c), "帶寬": bw}
         except:
-            res[k] = {"燈號": "⚠️ 延遲", "價格": 0.0, "帶寬": 0.0}
+            res[k] = {"燈號": "⚠️ 延遲數據", "價格": 0.0, "帶寬": 0.0}
     return res
 
 m_env = get_market_env()
@@ -188,7 +187,7 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                     "策略": res_tag,
                     "漲幅%": f"{chg*100:.1f}%",
                     "成交值(億)": round(vol_amt, 1),
-                    "個股帶寬%": f"{bw*100:.1f}%",
+                    "個股帶寬%": f"{bw*100:.2f}%",
                     "比值": round(ratio, 2),
                     "產業排位": info["產業排位"],
                     "2026指標": info["實力指標"],
@@ -198,7 +197,16 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
         
         if results:
             df_res = pd.DataFrame(results)
-            st.dataframe(df_res, use_container_width=True, hide_index=True)
+            # --- 核心優化：凍結前兩欄 ---
+            st.dataframe(
+                df_res, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "代號": st.column_config.TextColumn("代號", pinned=True),
+                    "名稱": st.column_config.TextColumn("名稱", pinned=True)
+                }
+            )
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
