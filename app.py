@@ -98,27 +98,43 @@ def get_stock_info_full():
 
 stock_info_map = get_stock_info_full()
 
-# --- 4. 大盤環境偵測 ---
-@st.cache_data(ttl=180)
+# --- 4. 大盤環境偵測 (強化版) ---
+@st.cache_data(ttl=60) # 建議改為 60 秒，配合你的 1 分鐘更新
 def get_market_env():
     res = {}
-    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
-    for k, v in indices.items():
+    # 定義代號與可能的備用代號
+    indices_config = {
+        "上市": ["^TWII"],
+        "上櫃": ["^TWOII", "^TWO"] # 增加備用代號 ^TWO
+    }
+    
+    for k, symbols in indices_config.items():
+        df = pd.DataFrame()
+        for sym in symbols:
+            try:
+                df = yf.download(sym, period="4mo", progress=False)
+                if not df.empty and len(df) > 10:
+                    break # 抓到資料就跳出備用代號迴圈
+            except:
+                continue
+        
         try:
-            df = yf.download(v, period="4mo", progress=False)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            if isinstance(df.columns, pd.MultiIndex): 
+                df.columns = df.columns.get_level_values(0)
             df = df.dropna(subset=['Close'])
-            c = df['Close'].iloc[-1]
+            
+            c = float(df['Close'].iloc[-1])
             m5 = df['Close'].rolling(5).mean().iloc[-1]
             m20 = df['Close'].rolling(20).mean().iloc[-1]
             std_val = df['Close'].rolling(20).std().iloc[-1]
             bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+            
             light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-            res[k] = {"燈號": light, "價格": float(c), "帶寬": bw}
+            res[k] = {"燈號": light, "價格": c, "帶寬": bw}
         except:
-            res[k] = {"燈號": "⚠️ 延遲數據", "價格": 0.0, "帶寬": 0.0}
+            res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
+            
     return res
-
 m_env = get_market_env()
 
 # --- 5. 主畫面 ---
