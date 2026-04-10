@@ -11,7 +11,12 @@ from streamlit_autorefresh import st_autorefresh
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
+# 自動刷新設定 (300000ms = 5分鐘)
 st_autorefresh(interval=300000, key="datarefresh")
+
+# 初始化 session_state，用來存放搜尋結果
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = None
 
 def set_ui_cleanup(image_file):
     b64_encoded = ""
@@ -24,15 +29,15 @@ def set_ui_cleanup(image_file):
     .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
     .stApp::before {{ content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.7); z-index: -1; }}
     
-    /* 修正頂部空白：強制主容器與頂部對齊 */
+    /* 修正頂部空白 */
     [data-testid="stAppViewMain"] > div:first-child {{ padding-top: 0rem !important; }}
     .stMainBlockContainer {{ padding-top: 1.5rem !important; padding-bottom: 1rem !important; }}
     
-    /* 隱藏不必要的 UI 元素 */
+    /* 隱藏 UI 元素 */
     [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], footer, #MainMenu {{ display: none !important; }}
     header {{ background: transparent !important; height: 3rem !important; }} 
     
-    /* 大盤戰情區塊：半透明模糊效果 */
+    /* 大盤戰情區塊 */
     div[data-testid="stHorizontalBlock"] {{ 
         position: sticky; 
         top: 0px; 
@@ -65,7 +70,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 深度讀取 (修正 nan 問題) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -77,9 +82,7 @@ def get_stock_info_full():
                     df_local = pd.read_csv(f_name, encoding='utf-8-sig')
                 except:
                     df_local = pd.read_csv(f_name, encoding='cp950')
-                
                 df_local = df_local.fillna('-')
-                
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
                     if code.isdigit():
@@ -127,6 +130,7 @@ with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['
 tw_tz = pytz.timezone('Asia/Taipei')
 st.write(f"📅 **數據更新：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M')}**")
 
+# --- 6. 側邊欄與搜尋邏輯 ---
 st.sidebar.title("🛠️ 設定區")
 raw_input = st.sidebar.text_area("輸入股票代碼", height=200)
 
@@ -182,32 +186,30 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                     res_tag = "⚪ " + "/".join(fail_reasons)
 
                 results.append({
-                    "代號": code,
-                    "名稱": info["簡稱"],
-                    "策略": res_tag,
-                    "漲幅%": f"{chg*100:.1f}%",
-                    "成交值(億)": round(vol_amt, 1),
-                    "個股帶寬%": f"{bw*100:.2f}%",
-                    "比值": round(ratio, 2),
-                    "產業排位": info["產業排位"],
-                    "2026指標": info["實力指標"],
-                    "族群細分": info["族群細分"],
-                    "關鍵技術/報價": info["關鍵技術"]
+                    "代號": code, "名稱": info["簡稱"], "策略": res_tag,
+                    "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
+                    "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
+                    "產業排位": info["產業排位"], "2026指標": info["實力指標"],
+                    "族群細分": info["族群細分"], "關鍵技術/報價": info["關鍵技術"]
                 })
         
+        # 將結果存入 session_state
         if results:
-            df_res = pd.DataFrame(results)
-            # --- 核心優化：凍結前兩欄 ---
-            st.dataframe(
-                df_res, 
-                use_container_width=True, 
-                hide_index=True,
-                column_config={
-                    "代號": st.column_config.TextColumn("代號", pinned=True),
-                    "名稱": st.column_config.TextColumn("名稱", pinned=True)
-                }
-            )
+            st.session_state.scan_results = pd.DataFrame(results)
+
+# --- 7. 顯示結果 (即使網頁自動刷新，資料也會保留) ---
+if st.session_state.scan_results is not None:
+    st.dataframe(
+        st.session_state.scan_results, 
+        use_container_width=True, 
+        hide_index=True,
+        column_config={
+            "代號": st.column_config.TextColumn("代號", pinned=True),
+            "名稱": st.column_config.TextColumn("名稱", pinned=True)
+        }
+    )
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
+    st.session_state.scan_results = None  # 登出時清空資料
     st.rerun()
