@@ -11,8 +11,8 @@ from streamlit_autorefresh import st_autorefresh
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 
-# 自動刷新設定 (300000ms = 5分鐘)
-st_autorefresh(interval=300000, key="datarefresh")
+# 自動刷新設定 (180000ms = 3分鐘)
+st_autorefresh(interval=180000, key="datarefresh")
 
 # 初始化 session_state，用來存放搜尋結果
 if "scan_results" not in st.session_state:
@@ -99,7 +99,7 @@ def get_stock_info_full():
 stock_info_map = get_stock_info_full()
 
 # --- 4. 大盤環境偵測 ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=180)
 def get_market_env():
     res = {}
     indices = {"上市": "^TWII", "上櫃": "^TWOII"}
