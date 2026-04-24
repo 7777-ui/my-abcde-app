@@ -9,11 +9,10 @@ import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 (取代延遲的 yfinance) ---
+# --- 0. 🚀 即時數據抓取函數 (解決 15 分鐘延遲) ---
 def get_realtime_price(stock_id):
     """
-    抓取台灣 Yahoo 奇摩股市的即時價格 (免密碼、無延遲)
-    stock_id: '2330', '8069', 'OTC' (櫃買), 'TSE' (大盤)
+    精確抓取 Yahoo 台灣的即時成交價
     """
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -24,17 +23,23 @@ def get_realtime_price(stock_id):
     
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        # 利用正規表示式從網頁 JSON 中抓取 price
-        price_match = re.search(r'"price":"?([0-9,.]+)"?', response.text)
-        if price_match:
-            return float(price_match.group(1).replace(',', ''))
+        # 尋找 Yahoo JSON 中的價格標籤
+        patterns = [
+            r'"regularMarketPrice":\s*([0-9.]+)',
+            r'"price":\s*"([0-9,.]+)"'
+        ]
+        for p in patterns:
+            match = re.search(p, response.text)
+            if match:
+                val = float(match.group(1).replace(',', ''))
+                if val > 0: return val
     except:
         pass
     return None
 
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
-st_autorefresh(interval=180000, key="datarefresh") # 180秒自動重整
+st_autorefresh(interval=180000, key="datarefresh") # 3分鐘自動刷新
 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
@@ -102,37 +107,35 @@ def get_stock_info_full():
 
 stock_info_map = get_stock_info_full()
 
-# --- 4. 大盤環境偵測 (整合台灣版即時數據) ---
-@st.cache_data(ttl=60) # 縮短緩存時間，每分鐘都願意重新抓取
+# --- 4. 大盤環境偵測 (即時版) ---
+@st.cache_data(ttl=60) 
 def get_market_env():
     res = {}
-    indices = {"上市": "TSE", "上櫃": "OTC"}
+    # 對應即時函數的代碼
+    rt_indices = {"上市": "TSE", "上櫃": "OTC"}
+    # 對應 yfinance 的歷史代碼
     yf_indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     
-    for k, v in indices.items():
+    for k, v in rt_indices.items():
         try:
-            # 1. 抓取 Yahoo 台灣即時價 (無延遲)
-            rt_price = get_realtime_price(v)
+            # A. 抓即時現價
+            curr_p = get_realtime_price(v)
+            # B. 抓歷史日 K (算均線)
+            df_h = yf.download(yf_indices[k], period="2mo", progress=False)
             
-            # 2. 抓取歷史日 K 用於計算帶寬 (這部分維持 yf 因為歷史數據沒差)
-            df_history = yf.download(yf_indices[k], period="2mo", progress=False)
-            
-            if not df_history.empty and rt_price:
-                df = df_history.copy()
-                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                df = df.dropna(subset=['Close'])
+            if not df_h.empty and curr_p:
+                if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
+                df_h = df_h.dropna(subset=['Close'])
                 
-                # 計算基礎均線，但「現價」帶入剛抓到的即時價
-                m5 = df['Close'].rolling(5).mean().iloc[-1]
-                m20_list = df['Close'].iloc[-19:].tolist() + [rt_price] # 前19天+最新
-                m20 = sum(m20_list) / 20
+                # C. 重新混合計算 (前19日+今天即時)
+                c_list = df_h['Close'].iloc[-19:].tolist() + [curr_p]
+                m5 = (sum(c_list[-5:])) / 5
+                m20 = sum(c_list) / 20
+                std_v = pd.Series(c_list).std()
+                bw = (std_v * 4) / m20 if m20 != 0 else 0.0
                 
-                # 計算帶寬 (簡化版)
-                std_val = pd.Series(m20_list).std()
-                bw = (std_val * 4) / m20 if m20 != 0 else 0.0
-                
-                light = "🟢 綠燈" if rt_price > m5 else ("🟡 黃燈" if rt_price > m20 else "🔴 紅燈")
-                res[k] = {"燈號": light, "價格": rt_price, "帶寬": bw}
+                light = "🟢 綠燈" if curr_p > m5 else ("🟡 黃燈" if curr_p > m20 else "🔴 紅燈")
+                res[k] = {"燈號": light, "價格": curr_p, "帶寬": bw}
             else:
                 res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
         except:
@@ -148,7 +151,7 @@ with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
 tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **最後掃描時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (Yahoo 台灣即時源)")
+st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (已修正延遲)")
 
 # --- 6. 側邊欄與搜尋邏輯 ---
 st.sidebar.title("🛠️ 設定區")
@@ -158,7 +161,7 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
     
-    with st.spinner("同步 Yahoo 台灣即時報價中..."):
+    with st.spinner("同步即時報價中..."):
         for code in codes:
             info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
             
@@ -166,7 +169,7 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
             p_curr = get_realtime_price(code)
             if not p_curr: continue
             
-            # 2. 抓歷史 K 線 (yf)
+            # 2. 抓歷史 K 線
             df = yf.download(f"{code}.TW", period="2mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 10:
@@ -178,19 +181,19 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df = df.dropna(subset=['Close'])
                 env = m_env[m_type]
                 
-                # 將「即時價」帶入歷史計算
+                # 3. 重新帶入即時價計算 ABCDE
                 p_yest = df['Close'].iloc[-1]
-                close_list_20 = df['Close'].iloc[-19:].tolist() + [p_curr]
-                m20_curr = sum(close_list_20) / 20
-                std_curr = pd.Series(close_list_20).std()
-                upper_curr = m20_curr + (std_curr * 2)
-                bw = (std_curr * 4) / m20_curr if m20_curr != 0 else 0.0
+                close_20 = df['Close'].iloc[-19:].tolist() + [p_curr]
+                m20_now = sum(close_20) / 20
+                std_now = pd.Series(close_20).std()
+                upper_now = m20_now + (std_now * 2)
                 
+                bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
                 chg = (p_curr - p_yest) / p_yest
-                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 # 這裡成交量維持昨日
+                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
-                slope_pos = m20_curr > df['Close'].rolling(20).mean().iloc[-1] # 即時MA vs 昨日MA
-                break_upper = p_curr > upper_curr
+                slope_pos = m20_now > df['Close'].rolling(20).mean().iloc[-1]
+                break_upper = p_curr > upper_now
                 
                 res_tag = ""
                 fail_reasons = []
