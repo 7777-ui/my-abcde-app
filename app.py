@@ -111,24 +111,25 @@ stock_info_map = get_stock_info_full()
 @st.cache_data(ttl=60) 
 def get_market_env():
     res = {}
-    # 對應即時函數的代碼
     rt_indices = {"上市": "TSE", "上櫃": "OTC"}
-    # 對應 yfinance 的歷史代碼
     yf_indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     
     for k, v in rt_indices.items():
         try:
-            # A. 抓即時現價
             curr_p = get_realtime_price(v)
-            # B. 抓歷史日 K (算均線)
             df_h = yf.download(yf_indices[k], period="2mo", progress=False)
             
             if not df_h.empty and curr_p:
                 if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
                 df_h = df_h.dropna(subset=['Close'])
                 
-                # C. 重新混合計算 (前19日+今天即時)
-                c_list = df_h['Close'].iloc[-19:].tolist() + [curr_p]
+                # 判斷最後一筆是否為今天，確保均線計算基礎正確
+                if df_h.index[-1].date() >= datetime.now().date():
+                    base_list = df_h['Close'].iloc[-20:-1].tolist()
+                else:
+                    base_list = df_h['Close'].iloc[-19:].tolist()
+                
+                c_list = base_list + [curr_p]
                 m5 = (sum(c_list[-5:])) / 5
                 m20 = sum(c_list) / 20
                 std_v = pd.Series(c_list).std()
@@ -151,7 +152,7 @@ with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
 tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (已修正延遲)")
+st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (已修正漲幅 0% 問題)")
 
 # --- 6. 側邊欄與搜尋邏輯 ---
 st.sidebar.title("🛠️ 設定區")
@@ -165,11 +166,9 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
         for code in codes:
             info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
             
-            # 1. 抓即時價
             p_curr = get_realtime_price(code)
             if not p_curr: continue
             
-            # 2. 抓歷史 K 線
             df = yf.download(f"{code}.TW", period="2mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 10:
@@ -181,32 +180,25 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df = df.dropna(subset=['Close'])
                 env = m_env[m_type]
                 
-                # 3. 重新帶入即時價計算 ABCDE
-# 判斷 yfinance 最後一筆日期是否為今天，如果是，就取倒數第二筆作為昨收
-import datetime
-last_date = df.index[-1].date()
-today_date = datetime.date.today()
-
-if last_date >= today_date:
-    p_yest = float(df['Close'].iloc[-2]) # 取倒數第二筆才是真正的昨收
-    history_for_ma = df['Close'].iloc[-20:-1].tolist() # 取前19天歷史
-else:
-    p_yest = float(df['Close'].iloc[-1]) # yfinance 還沒更新今天，最後一筆就是昨收
-    history_for_ma = df['Close'].iloc[-19:].tolist()
-
-# 重新計算
-close_20 = history_for_ma + [p_curr]
-m20_now = sum(close_20) / 20
-                close_20 = df['Close'].iloc[-19:].tolist() + [p_curr]
+                # --- 修正核心：判定真正昨收價 ---
+                today_date = datetime.now().date()
+                if df.index[-1].date() >= today_date:
+                    p_yest = float(df['Close'].iloc[-2]) # 真正的昨收
+                    history_for_ma = df['Close'].iloc[-20:-1].tolist()
+                else:
+                    p_yest = float(df['Close'].iloc[-1]) # yf 還沒出今日 K，最後一筆即昨收
+                    history_for_ma = df['Close'].iloc[-19:].tolist()
+                
+                close_20 = history_for_ma + [p_curr]
                 m20_now = sum(close_20) / 20
                 std_now = pd.Series(close_20).std()
                 upper_now = m20_now + (std_now * 2)
                 
                 bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
-                chg = (p_curr - p_yest) / p_yest
+                chg = (p_curr - p_yest) / p_yest # 現在這會計算正確的漲停 10% 了
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
-                slope_pos = m20_now > df['Close'].rolling(20).mean().iloc[-1]
+                slope_pos = m20_now > sum(history_for_ma) / 20 # 即時 MA > 昨日 MA
                 break_upper = p_curr > upper_now
                 
                 res_tag = ""
