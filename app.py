@@ -5,16 +5,37 @@ import re
 import os
 import base64
 import pytz
+import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
+# --- 0. 🚀 即時數據抓取函數 (取代延遲的 yfinance) ---
+def get_realtime_price(stock_id):
+    """
+    抓取台灣 Yahoo 奇摩股市的即時價格 (免密碼、無延遲)
+    stock_id: '2330', '8069', 'OTC' (櫃買), 'TSE' (大盤)
+    """
+    if stock_id == 'OTC': target = '%5ETWOII'
+    elif stock_id == 'TSE': target = '%5ETWII'
+    else: target = stock_id
+
+    url = f"https://tw.stock.yahoo.com/quote/{target}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=5)
+        # 利用正規表示式從網頁 JSON 中抓取 price
+        price_match = re.search(r'"price":"?([0-9,.]+)"?', response.text)
+        if price_match:
+            return float(price_match.group(1).replace(',', ''))
+    except:
+        pass
+    return None
+
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
+st_autorefresh(interval=180000, key="datarefresh") # 180秒自動重整
 
-# 自動刷新設定 (180000ms = 3分鐘)
-st_autorefresh(interval=180000, key="datarefresh")
-
-# 初始化 session_state，用來存放搜尋結果
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
 
@@ -25,31 +46,16 @@ def set_ui_cleanup(image_file):
             b64_encoded = base64.b64encode(f.read()).decode()
     style = f"""
     <style>
-    /* 背景設置 */
     .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
     .stApp::before {{ content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.7); z-index: -1; }}
-    
-    /* 修正頂部空白 */
     [data-testid="stAppViewMain"] > div:first-child {{ padding-top: 0rem !important; }}
     .stMainBlockContainer {{ padding-top: 1.5rem !important; padding-bottom: 1rem !important; }}
-    
-    /* 隱藏 UI 元素 */
     [data-testid="manage-app-button"], .stManageAppButton, iframe[title="Manage app"], footer, #MainMenu {{ display: none !important; }}
     header {{ background: transparent !important; height: 3rem !important; }} 
-    
-    /* 大盤戰情區塊 */
     div[data-testid="stHorizontalBlock"] {{ 
-        position: sticky; 
-        top: 0px; 
-        z-index: 1000; 
-        background-color: rgba(30, 30, 30, 0.6); 
-        padding: 15px; 
-        border-radius: 12px; 
-        backdrop-filter: blur(10px); 
-        margin-top: -10px; 
+        position: sticky; top: 0px; z-index: 1000; background-color: rgba(30, 30, 30, 0.6); 
+        padding: 15px; border-radius: 12px; backdrop-filter: blur(10px); margin-top: -10px; 
     }}
-    
-    /* 表格背景強化 */
     .stDataFrame {{ background-color: rgba(20, 20, 20, 0.8) !important; border-radius: 10px; padding: 5px; }}
     </style>
     """
@@ -78,10 +84,8 @@ def get_stock_info_full():
     for f_name in files:
         if os.path.exists(f_name):
             try:
-                try:
-                    df_local = pd.read_csv(f_name, encoding='utf-8-sig')
-                except:
-                    df_local = pd.read_csv(f_name, encoding='cp950')
+                try: df_local = pd.read_csv(f_name, encoding='utf-8-sig')
+                except: df_local = pd.read_csv(f_name, encoding='cp950')
                 df_local = df_local.fillna('-')
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
@@ -98,89 +102,95 @@ def get_stock_info_full():
 
 stock_info_map = get_stock_info_full()
 
-# --- 4. 大盤環境偵測 (針對 180 秒重整優化版) ---
-# 將 ttl 設為 120 (2分鐘)，確保你 180 秒重整時，數據一定會更新
-@st.cache_data(ttl=120) 
+# --- 4. 大盤環境偵測 (整合台灣版即時數據) ---
+@st.cache_data(ttl=60) # 縮短緩存時間，每分鐘都願意重新抓取
 def get_market_env():
     res = {}
-    indices = {"上市": "^TWII", "上櫃": "^TWOII"}
+    indices = {"上市": "TSE", "上櫃": "OTC"}
+    yf_indices = {"上市": "^TWII", "上櫃": "^TWOII"}
     
     for k, v in indices.items():
         try:
-            # 1. 強迫抓取盤中分 K 資料，喚醒 ^TWOII
-            df_intraday = yf.download(v, period="1d", interval="1m", progress=False)
+            # 1. 抓取 Yahoo 台灣即時價 (無延遲)
+            rt_price = get_realtime_price(v)
             
-            # 2. 抓取歷史日 K 用於計算均線和帶寬
-            df_history = yf.download(v, period="4mo", progress=False)
+            # 2. 抓取歷史日 K 用於計算帶寬 (這部分維持 yf 因為歷史數據沒差)
+            df_history = yf.download(yf_indices[k], period="2mo", progress=False)
             
-            if not df_history.empty:
+            if not df_history.empty and rt_price:
                 df = df_history.copy()
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 df = df.dropna(subset=['Close'])
                 
-                # 3. 如果現在是盤中，有分 K 資料，就用分 K 的最新價覆蓋日 K 最後一筆
-                if not df_intraday.empty:
-                    if isinstance(df_intraday.columns, pd.MultiIndex): 
-                        df_intraday.columns = df_intraday.columns.get_level_values(0)
-                    latest_price = float(df_intraday['Close'].iloc[-1])
-                    # 覆蓋最後一筆價格，確保帶寬和燈號計算是基於「現在這一秒」
-                    df.iloc[-1, df.columns.get_loc('Close')] = latest_price
-
-                c = float(df['Close'].iloc[-1])
+                # 計算基礎均線，但「現價」帶入剛抓到的即時價
                 m5 = df['Close'].rolling(5).mean().iloc[-1]
-                m20 = df['Close'].rolling(20).mean().iloc[-1]
-                std_val = df['Close'].rolling(20).std().iloc[-1]
-                bw = (std_val * 4) / m20 if not pd.isna(std_val) and m20 != 0 else 0.0
+                m20_list = df['Close'].iloc[-19:].tolist() + [rt_price] # 前19天+最新
+                m20 = sum(m20_list) / 20
                 
-                light = "🟢 綠燈" if c > m5 else ("🟡 黃燈" if c > m20 else "🔴 紅燈")
-                res[k] = {"燈號": light, "價格": c, "帶寬": bw}
-        except Exception as e:
+                # 計算帶寬 (簡化版)
+                std_val = pd.Series(m20_list).std()
+                bw = (std_val * 4) / m20 if m20 != 0 else 0.0
+                
+                light = "🟢 綠燈" if rt_price > m5 else ("🟡 黃燈" if rt_price > m20 else "🔴 紅燈")
+                res[k] = {"燈號": light, "價格": rt_price, "帶寬": bw}
+            else:
+                res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
+        except:
             res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
-            
     return res
+
 m_env = get_market_env()
 
 # --- 5. 主畫面 ---
-st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
+st.markdown("### 🏹 姊布林 ABCDE 策略戰情室 (即時版)")
 m_col1, m_col2 = st.columns(2)
 with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
 tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **數據更新：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M')}**")
+st.write(f"📅 **最後掃描時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (Yahoo 台灣即時源)")
 
 # --- 6. 側邊欄與搜尋邏輯 ---
 st.sidebar.title("🛠️ 設定區")
-raw_input = st.sidebar.text_area("輸入股票代碼", height=200)
+raw_input = st.sidebar.text_area("輸入股票代碼", height=150)
 
 if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
     
-    with st.spinner("分析中..."):
+    with st.spinner("同步 Yahoo 台灣即時報價中..."):
         for code in codes:
             info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
-            df = yf.download(f"{code}.TW", period="4mo", progress=False)
+            
+            # 1. 抓即時價
+            p_curr = get_realtime_price(code)
+            if not p_curr: continue
+            
+            # 2. 抓歷史 K 線 (yf)
+            df = yf.download(f"{code}.TW", period="2mo", progress=False)
             m_type = "上市"
             if df.empty or len(df) < 10:
-                df = yf.download(f"{code}.TWO", period="4mo", progress=False)
+                df = yf.download(f"{code}.TWO", period="2mo", progress=False)
                 m_type = "上櫃"
 
             if not df.empty and len(df) >= 20:
                 if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                 df = df.dropna(subset=['Close'])
                 env = m_env[m_type]
-                df['20MA'] = df['Close'].rolling(20).mean()
-                df['Upper'] = df['20MA'] + (df['Close'].rolling(20).std() * 2)
                 
-                p_curr, p_yest = df['Close'].iloc[-1], df['Close'].iloc[-2]
-                std_ind = df['Close'].rolling(20).std().iloc[-1]
-                bw = (std_ind * 4) / df['20MA'].iloc[-1] if not pd.isna(std_ind) else 0.0
+                # 將「即時價」帶入歷史計算
+                p_yest = df['Close'].iloc[-1]
+                close_list_20 = df['Close'].iloc[-19:].tolist() + [p_curr]
+                m20_curr = sum(close_list_20) / 20
+                std_curr = pd.Series(close_list_20).std()
+                upper_curr = m20_curr + (std_curr * 2)
+                bw = (std_curr * 4) / m20_curr if m20_curr != 0 else 0.0
+                
                 chg = (p_curr - p_yest) / p_yest
-                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000
+                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 # 這裡成交量維持昨日
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
-                slope_pos = df['20MA'].iloc[-1] > df['20MA'].iloc[-2]
-                break_upper = p_curr > df['Upper'].iloc[-1]
+                slope_pos = m20_curr > df['Close'].rolling(20).mean().iloc[-1] # 即時MA vs 昨日MA
+                break_upper = p_curr > upper_curr
                 
                 res_tag = ""
                 fail_reasons = []
@@ -199,24 +209,21 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                     elif "🟡" in env['燈號'] or "🔴" in env['燈號']:
                         if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
                         elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                    
                     if not res_tag: res_tag = "⚪ 參數不符"
                 else:
                     res_tag = "⚪ " + "/".join(fail_reasons)
 
                 results.append({
                     "代號": code, "名稱": info["簡稱"], "策略": res_tag,
-                    "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
+                    "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
                     "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
                     "產業排位": info["產業排位"], "2026指標": info["實力指標"],
-                    "族群細分": info["族群細分"], "關鍵技術/報價": info["關鍵技術"]
+                    "族群細分": info["族群細分"], "關鍵技術": info["關鍵技術"]
                 })
-        
-        # 將結果存入 session_state
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 7. 顯示結果 (即使網頁自動刷新，資料也會保留) ---
+# --- 7. 顯示結果 ---
 if st.session_state.scan_results is not None:
     st.dataframe(
         st.session_state.scan_results, 
@@ -224,11 +231,12 @@ if st.session_state.scan_results is not None:
         hide_index=True,
         column_config={
             "代號": st.column_config.TextColumn("代號", pinned=True),
-            "名稱": st.column_config.TextColumn("名稱", pinned=True)
+            "名稱": st.column_config.TextColumn("名稱", pinned=True),
+            "現價": st.column_config.NumberColumn("現價", format="%.2f")
         }
     )
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
-    st.session_state.scan_results = None  # 登出時清空資料
+    st.session_state.scan_results = None
     st.rerun()
