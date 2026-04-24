@@ -28,33 +28,51 @@ def get_realtime_price(stock_id):
     except: pass
     return None
 
-# --- 0.1 🏎️ 數據修復與動能計算 (三竹 SDK: Day=10, MA=10) ---
+# --- 0.1 🏎️ 歷史數據快取 (加入 MultiIndex 修正) ---
 @st.cache_data(ttl=3600)
 def get_historical_data(code_with_suffix):
     df = yf.download(code_with_suffix, period="3mo", progress=False)
     if not df.empty:
-        if isinstance(df.columns, pd.MultiIndex): 
+        if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.dropna(subset=['Close'])
     return df
 
+# --- 0.2 📊 三竹動能 SDK 計算 (Day=10, MA=10) ---
 def calculate_mtm_sdk(df, p_curr):
-    """計算 MTM(10) 與 MTM_MA(10)"""
     if df is None or len(df) < 22: return 0, 0, False
     prices = df['Close'].tolist() + [p_curr]
+    # MTM = 當前價 - 10日前價
     mtm_series = [prices[i] - prices[i-10] for i in range(10, len(prices))]
     curr_mtm = round(mtm_series[-1], 2)
+    # MTM_MA = MTM 的 10 日均線
     mtm_ma = sum(mtm_series[-10:]) / 10
+    # 轉強定義
     is_strong = curr_mtm > 0 and curr_mtm > mtm_ma
     proc = round((curr_mtm / prices[-11]) * 100, 2) if prices[-11] != 0 else 0
     return curr_mtm, proc, is_strong
 
-# --- 1. 網頁配置 ---
+# --- 1. 網頁配置與背景設置 (恢復你的原始樣式) ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = None
+
+def set_ui_cleanup(image_file):
+    b64_encoded = ""
+    if os.path.exists(image_file):
+        with open(image_file, "rb") as f:
+            b64_encoded = base64.b64encode(f.read()).decode()
+    style = f"""
+    <style>
+    .stApp {{ background-image: url("data:image/jpeg;base64,{b64_encoded}"); background-attachment: fixed; background-size: cover; background-position: center; }}
+    .stApp::before {{ content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0, 0, 0, 0.7); z-index: -1; }}
+    .stDataFrame {{ background-color: rgba(20, 20, 20, 0.8) !important; border-radius: 10px; padding: 5px; }}
+    </style>
+    """
+    st.markdown(style, unsafe_allow_html=True)
+set_ui_cleanup("header_image.png")
 
 # --- 2. 🔐 密碼鎖 ---
 if "password_correct" not in st.session_state:
@@ -73,7 +91,8 @@ if not st.session_state.password_correct:
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
-    for f_name in ["TWSE.csv", "TPEX.csv"]:
+    files = ["TWSE.csv", "TPEX.csv"] 
+    for f_name in files:
         if os.path.exists(f_name):
             try:
                 try: df_local = pd.read_csv(f_name, encoding='utf-8-sig')
@@ -117,30 +136,28 @@ def get_market_env():
 
 m_env = get_market_env()
 
-# --- 5. 主畫面與掃描邏輯 ---
-st.markdown("### 🏹 姊布林 ABCDE 策略戰情室 (動能整合版)")
+# --- 5. 主畫面 ---
+st.markdown("### 🏹 姊布林 ABCDE 策略戰情室 (即時優化版)")
 m_col1, m_col2 = st.columns(2)
 with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
-st.sidebar.title("🛠️ 設定區")
-raw_input = st.sidebar.text_area("輸入股票代碼 (不限條件)", height=100)
-scan_all = st.sidebar.button("📡 全市場掃描 (2E准入)")
-scan_manual = st.sidebar.button("🔍 指定搜尋")
+tw_tz = pytz.timezone('Asia/Taipei')
+st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (動能准入機制已啟動)")
 
-if (scan_all or scan_manual):
-    if scan_all:
-        codes = list(stock_info_map.keys())
-        strict_mode = True
-    else:
-        codes = re.findall(r'\b\d{4,6}\b', raw_input)
-        strict_mode = False
-    
+# --- 6. 側邊欄與搜尋邏輯 ---
+st.sidebar.title("🛠️ 設定區")
+raw_input = st.sidebar.text_area("輸入股票代碼", height=150)
+scan_btn = st.sidebar.button("🚀 開始掃描戰情")
+
+if scan_btn and (raw_input or "all_scan" in st.session_state):
+    codes = re.findall(r'\b\d{4,6}\b', raw_input)
     results = []
     main_market_light = m_env['上市']['燈號']
     
-    with st.spinner("戰情掃描中..."):
+    with st.spinner("分析環境中..."):
         for code in codes:
+            info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
             p_curr = get_realtime_price(code)
             if not p_curr: continue
             
@@ -149,70 +166,75 @@ if (scan_all or scan_manual):
             if df.empty or len(df) < 20:
                 df = get_historical_data(f"{code}.TWO")
                 m_type = "上櫃"
-            if df.empty or len(df) < 22: continue
 
-            # A. 准入門檻指標 (2E)
-            p_yest = float(df['Close'].iloc[-1])
-            chg = (p_curr - p_yest) / p_yest
-            vol_amt = (df['Volume'].iloc[-1] * p_curr * 1000) / 100000000 
-            mtm, proc, is_strong = calculate_mtm_sdk(df, p_curr)
-            
-            # 全市場掃描過濾：需滿 2E 且漲 且動能轉強
-            if strict_mode and (vol_amt < 2.0 or chg <= 0 or not is_strong): continue
+            if not df.empty and len(df) >= 22:
+                # --- A. 基礎數據與動能計算 (2E 門檻基準) ---
+                p_yest = float(df['Close'].iloc[-1])
+                chg = (p_curr - p_yest) / p_yest
+                vol_amt = (df['Volume'].iloc[-1] * p_curr * 1000) / 100000000 
+                mtm, proc, is_strong = calculate_mtm_sdk(df, p_curr)
+                
+                # --- B. 姊布林 5E 策略邏輯 ---
+                current_env = m_env[m_type]
+                history_for_ma = df['Close'].iloc[-19:].tolist()
+                close_20 = history_for_ma + [p_curr]
+                m20_now = sum(close_20) / 20
+                std_now = pd.Series(close_20).std()
+                upper_now = m20_now + (std_now * 2)
+                bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
+                ratio = bw / current_env['帶寬'] if current_env['帶寬'] > 0 else 0
+                slope_pos = m20_now > sum(df['Close'].iloc[-20:-1]) / 20
+                
+                # 判定 5E 策略失敗原因
+                res_tag = ""
+                fail_reasons = []
+                if vol_amt < 5.0: fail_reasons.append("量未達5E")
+                if p_curr <= upper_now: fail_reasons.append("未站上軌")
+                if not slope_pos: fail_reasons.append("斜率負")
 
-            # B. 姊布林 ABCDE 策略判定 (5E 門檻)
-            current_env = m_env[m_type]
-            history_for_ma = df['Close'].iloc[-19:].tolist()
-            close_20 = history_for_ma + [p_curr]
-            m20_now = sum(close_20) / 20
-            std_now = pd.Series(close_20).std()
-            upper_now = m20_now + (std_now * 2)
-            bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
-            ratio = bw / current_env['帶寬'] if current_env['帶寬'] > 0 else 0
-            slope_pos = m20_now > sum(df['Close'].iloc[-20:-1]) / 20
-            
-            fail_reasons = []
-            if vol_amt < 5.0: fail_reasons.append("量未達5E")
-            if p_curr <= upper_now: fail_reasons.append("未站上軌")
-            if not slope_pos: fail_reasons.append("斜率負")
-            
-            res_tag = ""
-            if not fail_reasons:
-                if "🔴 紅燈" in main_market_light:
-                    if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-                    elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                    else: res_tag = "⚪ 參數不符(大盤紅燈)"
-                else:
-                    if "🟢 綠燈" in current_env['燈號']:
-                        env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
-                        if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：共振】"
-                        elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額】"
-                        elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                        elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗】"
-                    elif "🟡 黃燈" in current_env['燈號']:
+                # 符合 5E 基礎才進行評級
+                if not fail_reasons:
+                    if "🔴 紅燈" in main_market_light:
                         if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
                         elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                if not res_tag: res_tag = "⚪ 參數不符"
-            else:
-                res_tag = "⚪ " + "/".join(fail_reasons)
+                        else: res_tag = "⚪ 參數不符(大盤紅燈)"
+                    else:
+                        if "🟢 綠燈" in current_env['燈號']:
+                            env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
+                            if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：共振】"
+                            elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額】"
+                            elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                            elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
+                            elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗】"
+                        elif "🟡 黃燈" in current_env['燈號']:
+                            if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                            elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
+                    if not res_tag: res_tag = "⚪ 參數不符"
+                else:
+                    res_tag = "⚪ " + "/".join(fail_reasons)
 
-            info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
-            results.append({
-                "代號": code, "名稱": info["簡稱"], 
-                "動能": "🚀 轉強" if is_strong else "⚪ 平穩",
-                "策略標籤": res_tag,
-                "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
-                "MTM": mtm, "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
-                "族群細分": info["族群細分"], "實力指標": info["實力指標"]
-            })
+                # --- C. 准入門檻 (2E 意義：是否顯示在清單) ---
+                # 只要成交量 > 2E 且動能轉強，就加入列表
+                if vol_amt >= 2.0 and is_strong:
+                    results.append({
+                        "代號": code, "名稱": info["簡稱"], 
+                        "動能": "🚀 轉強",
+                        "策略標籤": res_tag,
+                        "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
+                        "成交值(億)": round(vol_amt, 1),
+                        "MTM": mtm,
+                        "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
+                        "產業排位": info["產業排位"], "2026指標": info["實力指標"],
+                        "族群細分": info["族群細分"], "關鍵技術": info["關鍵技術"]
+                    })
         
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
         else:
-            st.warning("查無符合條件之標的")
+            st.session_state.scan_results = None
+            st.warning("⚠️ 查無符合「2E成交值且動能轉強」之標的")
 
-# --- 6. 顯示結果 ---
+# --- 7. 顯示結果 ---
 if st.session_state.scan_results is not None:
     st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
 
