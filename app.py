@@ -9,13 +9,13 @@ import requests
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 ---
+# --- 0. 🚀 即時數據抓取函數 (Yahoo Finance 爬蟲) ---
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
     else: target = stock_id
     url = f"https://tw.stock.yahoo.com/quote/{target}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers, timeout=5)
         patterns = [r'"regularMarketPrice":\s*([0-9.]+)', r'"price":\s*"([0-9,.]+)"']
@@ -32,16 +32,15 @@ def get_realtime_price(stock_id):
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="3mo", progress=False)
 
-def calculate_mtm_momentum(df, p_curr):
-    """
-    對齊三竹: MTM(10), MTM_MA(10)
-    """
+def calculate_momentum_sdk(df, p_curr):
+    """計算三竹動能 MTM(10) 與 MTM 均線"""
     if df is None or len(df) < 25: return 0, 0, False
+    # 取得歷史收盤價序列
     prices = df['Close'].dropna().tolist()
-    # 確保包含今日即時價
+    # 將即時價格加入序列末端
     full_prices = prices + [p_curr]
     
-    # 計算 MTM 序列 (現價 - 10天前)
+    # MTM(10): 當前價 - 10日前價
     mtm_series = []
     for i in range(10, len(full_prices)):
         mtm_series.append(full_prices[i] - full_prices[i-10])
@@ -49,10 +48,10 @@ def calculate_mtm_momentum(df, p_curr):
     curr_mtm = round(mtm_series[-1], 2)
     mtm_ma10 = sum(mtm_series[-10:]) / 10
     
-    # 轉強條件：MTM > 0 且 MTM 站上均線
+    # 轉強條件：MTM > 0 且 站在 MTM 均線之上
     is_strong = curr_mtm > 0 and curr_mtm > mtm_ma10
     
-    # PROC% (變動率)
+    # PROC% (10日變動率)
     p_ref = full_prices[-11]
     proc = round((curr_mtm / p_ref) * 100, 2) if p_ref != 0 else 0
     
@@ -144,14 +143,8 @@ def get_market_env():
 
 m_env = get_market_env()
 
-# --- 5. 主畫面 ---
-st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
-m_col1, m_col2 = st.columns(2)
-with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
-with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
-
-# --- 6. 核心處理邏輯 (搜尋與掃描通用) ---
-def process_core(codes, auto_filter=False):
+# --- 5. 核心分析處理 (整合 ABCDE 與 三竹動能) ---
+def analyze_stocks(codes, filter_mode=False):
     results = []
     main_market_light = m_env['上市']['燈號']
     
@@ -160,6 +153,7 @@ def process_core(codes, auto_filter=False):
         p_curr = get_realtime_price(code)
         if not p_curr: continue
         
+        # 抓取數據與判定市場
         df = get_historical_data(f"{code}.TW")
         m_type = "上市"
         if df.empty or len(df) < 20:
@@ -170,20 +164,22 @@ def process_core(codes, auto_filter=False):
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
         df = df.dropna(subset=['Close'])
         
-        # 基礎指標
+        # 1. 基礎指標計算
         p_yest = float(df['Close'].iloc[-1])
         chg = (p_curr - p_yest) / p_yest
-        # 🔥 修正成交值 (台股張數需 * 1000)
+        # 🔥 成交值修正 (張數 * 價格 * 1000 / 1億)
         vol_amt = (df['Volume'].iloc[-1] * p_curr * 1000) / 100000000 
         
-        # 動能計算 (MTM 10, 10)
-        mtm_val, proc, is_strong = calculate_mtm_momentum(df, p_curr)
+        # 2. 三竹動能 SDK 計算 (Day=10, MA=10)
+        mtm_val, proc_val, is_strong = calculate_momentum_sdk(df, p_curr)
         
-        # --- 全市場掃描門檻 ---
-        if auto_filter:
-            if chg < 0.02 or vol_amt < 2.0 or not is_strong: continue
-        
-        # 姊布林 ABCDE 邏輯
+        # --- 全市場掃描過濾門檻 ---
+        if filter_mode:
+            if chg < 0.02: continue      # 漲幅 > 2%
+            if vol_amt < 2.0: continue   # 成交值 > 2 億
+            if not is_strong: continue   # 動能轉強
+            
+        # 3. 姊布林 ABCDE 邏輯
         current_env = m_env[m_type]
         history_for_ma = df['Close'].iloc[-19:].tolist()
         close_20 = history_for_ma + [p_curr]
@@ -196,6 +192,7 @@ def process_core(codes, auto_filter=False):
         
         res_tag = ""
         if p_curr > upper_now and slope_pos and vol_amt >= 5:
+            # (此處省略部分詳細 ABCDE 判斷邏輯，維持與原程式碼一致)
             if "🔴 紅燈" in main_market_light:
                 if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
                 elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
@@ -212,38 +209,45 @@ def process_core(codes, auto_filter=False):
                     elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
 
         results.append({
-            "代號": code, "名稱": info["簡稱"], "動能狀態": "🚀轉強" if is_strong else "⚪平穩",
-            "策略": res_tag if res_tag else "⚪未達標",
+            "代號": code, "名稱": info["簡稱"], 
+            "動能": "🚀轉強" if is_strong else "⚪平穩",
+            "ABCDE策略": res_tag if res_tag else "⚪觀察",
             "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
-            "MTM": mtm_val, "PROC%": proc, "個股帶寬%": f"{bw*100:.1f}%",
+            "MTM": mtm_val, "PROC%": proc_val, "個股帶寬%": f"{bw*100:.1f}%",
             "族群細分": info["族群細分"], "關鍵技術": info["關鍵技術"]
         })
     return results
 
-# --- 7. 側邊欄 ---
-st.sidebar.title("🛠️ 設定區")
-raw_input = st.sidebar.text_area("1. 手動搜尋代碼", height=100)
-if st.sidebar.button("🔍 開始搜尋"):
+# --- 6. 主畫面顯示 ---
+st.markdown("### 🏹 姊布林 ABCDE 策略戰情室 (三竹動能同步版)")
+m_col1, m_col2 = st.columns(2)
+with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
+with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+
+# --- 7. 側邊欄控制區 ---
+st.sidebar.title("🛠️ 戰情控制中心")
+raw_input = st.sidebar.text_area("1. 手動輸入代碼 (不限門檻)", height=100)
+if st.sidebar.button("🔍 執行指定搜尋"):
     codes = re.findall(r'\b\d{4,6}\b', raw_input)
     if codes:
-        st.session_state.scan_results = pd.DataFrame(process_core(codes, auto_filter=False))
+        st.session_state.scan_results = pd.DataFrame(analyze_stocks(codes, filter_mode=False))
 
 st.sidebar.markdown("---")
-if st.sidebar.button("📡 全市場動能一鍵掃描"):
+if st.sidebar.button("📡 啟動全市場動能掃描"):
     all_codes = list(stock_info_map.keys())
-    with st.spinner(f"正在掃描全市場 {len(all_codes)} 檔股票..."):
-        res = process_core(all_codes, auto_filter=True)
+    with st.spinner(f"正在分析全台股 {len(all_codes)} 檔標的..."):
+        res = analyze_stocks(all_codes, filter_mode=True)
         if res:
             st.session_state.scan_results = pd.DataFrame(res)
-            st.sidebar.success(f"掃描完成，找到 {len(res)} 檔")
+            st.sidebar.success(f"找到 {len(res)} 檔符合動能標的！")
         else:
-            st.sidebar.warning("目前市場無符合「漲>2%且量>2億」且「MTM轉強」標的")
+            st.sidebar.warning("當前無標的符合「漲>2%且量>2億」及「動能轉強」條件。")
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
     st.session_state.scan_results = None
     st.rerun()
 
-# --- 8. 顯示結果 ---
+# --- 8. 結果數據表 ---
 if st.session_state.scan_results is not None:
     st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
