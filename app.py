@@ -23,7 +23,6 @@ def get_realtime_price(stock_id):
     
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        # 尋找 Yahoo JSON 中的價格標籤
         patterns = [
             r'"regularMarketPrice":\s*([0-9.]+)',
             r'"price":\s*"([0-9,.]+)"'
@@ -36,6 +35,14 @@ def get_realtime_price(stock_id):
     except:
         pass
     return None
+
+# --- 0.1 🏎️ 歷史數據快取 (大幅提升搜尋速度) ---
+@st.cache_data(ttl=3600)  # 快取一小時，一小時內重複搜尋同一股票會秒出結果
+def get_historical_data(code_with_suffix):
+    """
+    包裝 yfinance 下載功能，避免重複連線消耗時間
+    """
+    return yf.download(code_with_suffix, period="2mo", progress=False)
 
 # --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
@@ -117,13 +124,13 @@ def get_market_env():
     for k, v in rt_indices.items():
         try:
             curr_p = get_realtime_price(v)
-            df_h = yf.download(yf_indices[k], period="2mo", progress=False)
+            # 大盤環境偵測也改用快取加速
+            df_h = get_historical_data(yf_indices[k])
             
             if not df_h.empty and curr_p:
                 if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
                 df_h = df_h.dropna(subset=['Close'])
                 
-                # 判斷最後一筆是否為今天，確保均線計算基礎正確
                 if df_h.index[-1].date() >= datetime.now().date():
                     base_list = df_h['Close'].iloc[-20:-1].tolist()
                 else:
@@ -152,7 +159,7 @@ with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
 tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (已修正漲幅 0% 問題)")
+st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (快取優化加速中)")
 
 # --- 6. 側邊欄與搜尋邏輯 ---
 st.sidebar.title("🛠️ 設定區")
@@ -166,13 +173,15 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
         for code in codes:
             info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
             
+            # 1. 抓即時價 (每次搜尋都會抓最新)
             p_curr = get_realtime_price(code)
             if not p_curr: continue
             
-            df = yf.download(f"{code}.TW", period="2mo", progress=False)
+            # 2. 使用快取抓歷史 K 線 (顯著提升速度)
+            df = get_historical_data(f"{code}.TW")
             m_type = "上市"
             if df.empty or len(df) < 10:
-                df = yf.download(f"{code}.TWO", period="2mo", progress=False)
+                df = get_historical_data(f"{code}.TWO")
                 m_type = "上櫃"
 
             if not df.empty and len(df) >= 20:
@@ -180,13 +189,12 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 df = df.dropna(subset=['Close'])
                 env = m_env[m_type]
                 
-                # --- 修正核心：判定真正昨收價 ---
                 today_date = datetime.now().date()
                 if df.index[-1].date() >= today_date:
-                    p_yest = float(df['Close'].iloc[-2]) # 真正的昨收
+                    p_yest = float(df['Close'].iloc[-2])
                     history_for_ma = df['Close'].iloc[-20:-1].tolist()
                 else:
-                    p_yest = float(df['Close'].iloc[-1]) # yf 還沒出今日 K，最後一筆即昨收
+                    p_yest = float(df['Close'].iloc[-1])
                     history_for_ma = df['Close'].iloc[-19:].tolist()
                 
                 close_20 = history_for_ma + [p_curr]
@@ -195,10 +203,10 @@ if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
                 upper_now = m20_now + (std_now * 2)
                 
                 bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
-                chg = (p_curr - p_yest) / p_yest # 現在這會計算正確的漲停 10% 了
+                chg = (p_curr - p_yest) / p_yest
                 vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
                 ratio = bw / env['帶寬'] if env['帶寬'] > 0 else 0
-                slope_pos = m20_now > sum(history_for_ma) / 20 # 即時 MA > 昨日 MA
+                slope_pos = m20_now > sum(history_for_ma) / 20
                 break_upper = p_curr > upper_now
                 
                 res_tag = ""
