@@ -33,7 +33,7 @@ def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
 def get_local_revenue(year_month):
-    """直接讀取資料夾內的營收檔案 (TWSE_202603.csv)"""
+    """直接讀取資料夾內的營收檔案 (TWSE_202603)"""
     folder = "每月營收資料"
     dfs = []
     for prefix in ["TWSE", "TPEX"]:
