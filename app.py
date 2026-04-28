@@ -151,7 +151,7 @@ elif mode == "📈 營收動能 (年增>20%)":
             st.session_state.rev_results = pd.DataFrame(res_list)
             status.empty()
         else:
-            st.warning(f"資料夾『每月營收資料』內找不到檔案 (需要: {', '.join(yms)})。請檢查檔名是否為 TWSE_YYYYMM.csv")
+            st.warning(f"資料夾『每月營收資料』內找不到檔案 (需要: {', '.join(yms)})。請檢查檔名是否為 TWSE_YYYYMM")
 
 if "rev_results" in st.session_state and mode == "📈 營收動能 (年增>20%)":
     st.dataframe(st.session_state.rev_results, use_container_width=True, hide_index=True)
