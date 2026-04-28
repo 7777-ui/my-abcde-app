@@ -10,7 +10,7 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 (維持基底) ---
+# --- 0. 🚀 即時數據抓取函數 ---
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -28,13 +28,13 @@ def get_realtime_price(stock_id):
     except: pass
     return None
 
-# --- 0.1 🏎️ 歷史數據快取 (維持基底) ---
+# --- 0.1 🏎️ 歷史數據快取 ---
 @st.cache_data(ttl=3600)
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
-# --- 1. 網頁配置與背景設置 (維持基底) ---
-st.set_page_config(page_title="🏹 戰情室總控", page_icon="🏹", layout="wide")
+# --- 1. 網頁配置與背景設置 ---
+st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
 if "scan_results" not in st.session_state:
@@ -55,7 +55,7 @@ def set_ui_cleanup(image_file):
     st.markdown(style, unsafe_allow_html=True)
 set_ui_cleanup("header_image.png")
 
-# --- 2. 🔐 密碼鎖 (維持基底) ---
+# --- 2. 🔐 密碼鎖 ---
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
 if not st.session_state.password_correct:
@@ -68,7 +68,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 (維持基底) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -84,50 +84,4 @@ def get_stock_info_full():
                     if code.isdigit():
                         mapping[code] = {
                             "簡稱": str(row.iloc[1]).strip(),
-                            "產業排位": str(row.iloc[2]).strip() if len(row) > 2 else "-",
-                            "實力指標": str(row.iloc[3]).strip() if len(row) > 3 else "-",
-                            "族群細分": str(row.iloc[4]).strip() if len(row) > 4 else "-",
-                            "關鍵技術": str(row.iloc[5]).strip() if len(row) > 5 else "-"
-                        }
-            except: pass
-    return mapping
-stock_info_map = get_stock_info_full()
-
-# --- 4. 大盤環境偵測 (維持基底) ---
-@st.cache_data(ttl=60) 
-def get_market_env():
-    res = {}
-    rt_indices = {"上市": "TSE", "上櫃": "OTC"}
-    yf_indices = {"上市": "^TWII", "上櫃": "^TWOII"}
-    for k, v in rt_indices.items():
-        try:
-            curr_p = get_realtime_price(v)
-            df_h = get_historical_data(yf_indices[k])
-            if not df_h.empty and curr_p:
-                if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
-                df_h = df_h.dropna(subset=['Close'])
-                base_list = df_h['Close'].iloc[-20:-1].tolist() if df_h.index[-1].date() >= datetime.now().date() else df_h['Close'].iloc[-19:].tolist()
-                c_list = base_list + [curr_p]
-                m5, m20 = sum(c_list[-5:])/5, sum(c_list)/20
-                std_v = pd.Series(c_list).std()
-                bw = (std_v * 4) / m20 if m20 != 0 else 0.0
-                light = "🟢 綠燈" if curr_p > m5 else ("🟡 黃燈" if curr_p > m20 else "🔴 紅燈")
-                res[k] = {"燈號": light, "價格": curr_p, "帶寬": bw}
-            else: res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
-        except: res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
-    return res
-
-m_env = get_market_env()
-
-# --- 5. 主畫面 UI ---
-st.markdown("### 🏹 策略戰情室總控 (即時優化版)")
-m_col1, m_col2 = st.columns(2)
-with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
-with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
-
-tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}**")
-
-# --- 6. 側邊欄切換模式 ---
-st.sidebar.title("🛠️ 策略切換")
-mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "
+                            "產業排位": str(row.iloc[2]).strip() if len(row) >
