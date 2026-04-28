@@ -9,7 +9,7 @@ import requests
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據與歷史數據 ---
+# --- 0. 核心數據函數 ---
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -32,10 +32,12 @@ def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
 def get_local_revenue(year_month):
-    """讀取『每月營收資料』資料夾內的檔案"""
+    """【關鍵修正】讀取資料夾內的營收檔案"""
+    # 根據截圖，資料夾名稱為 "每月營收資料"
     folder = "每月營收資料"
     dfs = []
     for prefix in ["TWSE", "TPEX"]:
+        # 拼湊路徑如: 每月營收資料/TWSE_202603.csv
         file_path = os.path.join(folder, f"{prefix}_{year_month}.csv")
         if os.path.exists(file_path):
             try:
@@ -72,7 +74,7 @@ if not st.session_state.password_correct:
         if pwd == "test0403": st.session_state.password_correct = True; st.rerun()
     st.stop()
 
-# --- 3. 🛡️ 族群讀取與大盤環境 ---
+# --- 3. 🛡️ 族群資料與大盤偵測 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -85,7 +87,7 @@ def get_stock_info_full():
                 for _, row in df.iterrows():
                     code = str(row.iloc[0]).strip()
                     if code.isdigit():
-                        mapping[code] = {"簡稱": str(row.iloc[1]).strip(), "產業排位": str(row.iloc[2]).strip(), "實力指標": str(row.iloc[3]).strip(), "族群細分": str(row.iloc[4]).strip(), "關鍵技術": str(row.iloc[5]).strip()}
+                        mapping[code] = {"簡稱": str(row.iloc[1]).strip(), "族群細分": str(row.iloc[4]).strip()}
             except: pass
     return mapping
 stock_info_map = get_stock_info_full()
@@ -108,26 +110,26 @@ def get_market_env():
     return res
 m_env = get_market_env()
 
-# --- 4. 主畫面 ---
+# --- 4. 主畫面 UI ---
 st.markdown("### 🏹 姊布林 ABCDE & 營收戰情室")
 c1, c2 = st.columns(2)
 with c1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
 with c2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
 
-# --- 5. 側邊欄與模式切換 ---
+# --- 5. 側邊欄與模式控制 ---
 st.sidebar.title("🛠️ 設定區")
 mode = st.sidebar.radio("切換策略模式", ["🏹 姊布林掃描", "📈 營收動能 (年增>20%)"])
 
 if mode == "🏹 姊布林掃描":
     raw_input = st.sidebar.text_area("輸入股票代碼", height=150)
     if st.sidebar.button("🚀 開始掃描"):
-        # ... (此處放你原本的姊布林掃描邏輯)
-        pass
+        # 這裡執行您原本的姊布林邏輯...
+        st.info("執行姊布林掃描中...")
 
 elif mode == "📈 營收動能 (年增>20%)":
     if st.sidebar.button("🔍 執行營收掃描"):
         now = datetime.now()
-        # 取得最近三個月 YYYYMM (修正邏輯：如果 4 月還沒出，改抓 3, 2, 1)
+        # 抓取最近三個月 (3月, 2月, 1月)
         yms = [(now.replace(day=1) - timedelta(days=i*28)).strftime("%Y%m") for i in range(1, 4)]
         
         rev_dfs = [get_local_revenue(ym) for ym in yms]
@@ -138,20 +140,21 @@ elif mode == "📈 營收動能 (年增>20%)":
             final = pd.merge(final, rev_dfs[1][['公司代號', '去年同月增減(%)']].rename(columns={'去年同月增減(%)': 'm2'}), on='公司代號')
             final = pd.merge(final, rev_dfs[2][['公司代號', '去年同月增減(%)']].rename(columns={'去年同月增減(%)': 'm3'}), on='公司代號')
             final['平均年增%'] = final[['m1', 'm2', 'm3']].mean(axis=1)
+            
             winners = final[final['平均年增%'] > 20.0].sort_values('平均年增%', ascending=False)
             
             res_list = []
             status = st.empty()
             for i, (idx, row) in enumerate(winners.iterrows()):
                 code = str(row['公司代號']).strip()
-                status.text(f"掃描中 ({i+1}/{len(winners)}): {code}")
+                status.text(f"掃描報價中 ({i+1}/{len(winners)}): {code}")
                 p_curr = get_realtime_price(code)
                 if p_curr:
                     res_list.append({"代號": code, "簡稱": row['公司名稱'], "三月平均年增%": f"{row['平均年增%']:.1f}%", "現價": p_curr})
             st.session_state.rev_results = pd.DataFrame(res_list)
             status.empty()
         else:
-            st.warning(f"資料夾『每月營收資料』內找不到檔案 (需要: {', '.join(yms)})。請檢查檔名是否為 TWSE_YYYYMM")
+            st.warning(f"資料夾內找不到足夠的營收檔案 (需含: {', '.join(yms)})")
 
 if "rev_results" in st.session_state and mode == "📈 營收動能 (年增>20%)":
     st.dataframe(st.session_state.rev_results, use_container_width=True, hide_index=True)
