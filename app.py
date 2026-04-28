@@ -33,7 +33,7 @@ def get_historical_data(code_with_suffix):
 
 # --- 📂 營收檔案讀取 (支援中英文資料夾) ---
 def get_local_revenue_safe(year_month):
-    possible_folders = ["revenue_data", "每月營收資料"]
+    possible_folders = ["revenue_data"]
     dfs = []
     for folder in possible_folders:
         for prefix in ["TWSE", "TPEX"]:
@@ -181,7 +181,7 @@ elif mode == "📈 營收動能 (三月平均 > 20%)":
                     if cp: final.append({"代號": cid, "名稱": r['公司名稱'], "平均年增%": f"{r['平均年增%']:.1f}%", "現價": cp})
                 st.session_state.rev_results = pd.DataFrame(final)
             else:
-                st.error("❌ 檔案不足！請檢查 GitHub 上的『每月營收資料』資料夾是否包含 202601~03 的檔案。")
+                st.error("❌ 檔案不足！請檢查 GitHub 上的『revenue_data』資料夾是否包含 202601~03 的檔案。")
     if st.session_state.rev_results is not None: st.dataframe(st.session_state.rev_results, use_container_width=True, hide_index=True)
 
 if st.sidebar.button("🔐 安全登出"):
