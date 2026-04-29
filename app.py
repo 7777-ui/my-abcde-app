@@ -35,7 +35,7 @@ def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
 # --- 1. 網頁配置與背景設置 ---
-st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
+st.set_page_config(page_title="🏹 姊策略 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
 if "scan_results" not in st.session_state:
@@ -123,7 +123,7 @@ def get_market_env():
 m_env = get_market_env()
 
 # --- 5. 主畫面 ---
-st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
+st.markdown("### 🏹   策略戰情室")
 m_col1, m_col2 = st.columns(2)
 with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
