@@ -35,7 +35,7 @@ def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
 # --- 1. 網頁配置與背景設置 ---
-st.set_page_config(page_title="🏹 姊策略 戰情室", page_icon="🏹", layout="wide")
+st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
 if "scan_results" not in st.session_state:
@@ -123,7 +123,7 @@ def get_market_env():
 m_env = get_market_env()
 
 # --- 5. 主畫面 ---
-st.markdown("### 🏹   策略戰情室")
+st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
 m_col1, m_col2 = st.columns(2)
 with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
 with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
@@ -219,9 +219,9 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 ---
+# --- 8. 營收動能策略邏輯 (🛠️ /explain_math: 近三月平均年增率) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data/` 中海量資料並自動提取最新三月資料。")
+    st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料，計算平均年增率 (YoY)。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
@@ -239,29 +239,41 @@ elif mode == "營收動能策略":
                         try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         t_df.columns = [c.strip() for c in t_df.columns]
-                        target_col = '營業收入-當月營收'
-                        if '公司代號' in t_df.columns and target_col in t_df.columns:
+                        
+                        # 核心修改：抓取「當月營收」與「去年同月營收」計算 YoY
+                        col_now = '營業收入-當月營收'
+                        col_last_year = '去年同月營收'
+                        
+                        if '公司代號' in t_df.columns and col_now in t_df.columns and col_last_year in t_df.columns:
                             t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
-                            t_df[target_col] = pd.to_numeric(t_df[target_col].astype(str).str.replace(',', ''), errors='coerce')
-                            t_df = t_df.dropna(subset=['公司代號', target_col])
-                            month_dfs.append(t_df[['公司代號', '公司名稱', target_col]])
+                            # 清理數值格式
+                            t_df[col_now] = pd.to_numeric(t_df[col_now].astype(str).str.replace(',', ''), errors='coerce')
+                            t_df[col_last_year] = pd.to_numeric(t_df[col_last_year].astype(str).str.replace(',', ''), errors='coerce')
+                            
+                            # 計算該單月的年增率
+                            t_df['yoy'] = (t_df[col_now] - t_df[col_last_year]) / t_df[col_last_year]
+                            
+                            t_df = t_df.dropna(subset=['公司代號', 'yoy'])
+                            month_dfs.append(t_df[['公司代號', '公司名稱', 'yoy']])
                     except: continue
 
                 if len(month_dfs) == 3:
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
                     m1, m2, m3 = m1.drop_duplicates('公司代號'), m2.drop_duplicates('公司代號'), m3.drop_duplicates('公司代號')
                     
-                    merged = m1.rename(columns={'營業收入-當月營收': 'rev1'})
-                    merged = merged.merge(m2[['公司代號', '營業收入-當月營收']].rename(columns={'營業收入-當月營收': 'rev2'}), on='公司代號')
-                    merged = merged.merge(m3[['公司代號', '營業收入-當月營收']].rename(columns={'營業收入-當月營收': 'rev3'}), on='公司代號')
+                    # 整合三個月的年增率數據
+                    merged = m1.rename(columns={'yoy': 'yoy1'})
+                    merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
+                    merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                     
-                    merged['g1'] = (merged['rev1'] - merged['rev2']) / merged['rev2']
-                    merged['g2'] = (merged['rev2'] - merged['rev3']) / merged['rev3']
-                    merged['avg_growth'] = (merged['g1'] + merged['g2']) / 2 * 100
+                    # 計算平均年增率： (YoY1 + YoY2 + YoY3) / 3
+                    merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
+                    
+                    # 篩選條件：平均年增率 > 20%
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
-                        st.info("目前無符合平均增長率 > 20% 的公司。")
+                        st.info("目前無符合平均年增率 > 20% 的公司。")
                     else:
                         rev_results = []
                         for _, row in targets.iterrows():
@@ -283,7 +295,7 @@ elif mode == "營收動能策略":
                                 vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
                                 
                                 rev_results.append({
-                                    "市場": m_type, # 這裡加入市場別
+                                    "市場": m_type,
                                     "代號": code, "名稱": row['公司名稱'], 
                                     "三月均增%": f"{row['avg_growth']:.1f}%",
                                     "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
@@ -295,7 +307,6 @@ elif mode == "營收動能策略":
 # --- 9. 顯示結果 ---
 if st.session_state.scan_results is not None:
     st.markdown("### 📊 掃描結果清單")
-    # 將「市場」欄位移至第一列顯示，增加可讀性
     cols = st.session_state.scan_results.columns.tolist()
     if "市場" in cols:
         cols.insert(0, cols.pop(cols.index("市場")))
