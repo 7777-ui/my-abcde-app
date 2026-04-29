@@ -10,8 +10,8 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 ---
-@st.cache_data(ttl=10)
+# --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
+@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -69,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 ---
+# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -217,63 +217,72 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已修改邏輯) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 修正版：強制欄位提取與近三月平均年增率計算) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data/` 檔名倒序提取最新三月營收進行 YoY 分析。")
+    st.sidebar.info("💡 偵測 `revenue_data/` 並計算近三月平均年增率 > 20% 個股。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
-        all_files = glob.glob(os.path.join(folder, "*.csv"))
-        # 按檔名倒序排列，確保 [202603.csv, 202602.csv, 202601.csv] 的順序
-        all_files.sort(reverse=True) 
-        
-        if len(all_files) < 3:
-            st.warning("⚠️ revenue_data 資料夾內 CSV 檔案不足 3 份。")
+        if not os.path.exists(folder):
+            st.error(f"❌ 找不到資料夾: {folder}")
         else:
-            recent_files = all_files[:3]
-            month_dfs = []
+            all_files = glob.glob(os.path.join(folder, "*.csv"))
+            # 按檔名倒序排列 (確保 202603 在 202602 前面)
+            all_files.sort(key=lambda x: os.path.basename(x), reverse=True) 
             
-            with st.spinner(f"正在合併分析: {[os.path.basename(f) for f in recent_files]}"):
-                for f in recent_files:
-                    try:
-                        try: t_df = pd.read_csv(f, encoding='utf-8-sig')
-                        except: t_df = pd.read_csv(f, encoding='cp950')
-                        
-                        # 清理欄位名稱
-                        t_df.columns = [c.strip() for c in t_df.columns]
-                        
-                        # 強制提取指定欄位
-                        needed_cols = ['公司代號', '公司名稱', '營業收入-當月營收', '營業收入-去年當月營收']
-                        if all(col in t_df.columns for col in needed_cols):
-                            t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
-                            # 數值清理
-                            for col in ['營業收入-當月營收', '營業收入-去年當月營收']:
-                                t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+            if len(all_files) < 3:
+                st.warning(f"⚠️ 資料夾內檔案不足 3 份 (目前僅有 {len(all_files)} 份)。")
+            else:
+                recent_files = all_files[:3]
+                processed_dfs = []
+                
+                with st.spinner(f"正在分析檔案: {[os.path.basename(f) for f in recent_files]}"):
+                    for f in recent_files:
+                        try:
+                            # 嘗試不同編碼讀取
+                            try: t_df = pd.read_csv(f, encoding='utf-8-sig')
+                            except: t_df = pd.read_csv(f, encoding='cp950')
                             
-                            # 計算該月 YoY
-                            t_df['yoy'] = (t_df['營業收入-當月營收'] - t_df['營業收入-去年當月營收']) / t_df['營業收入-去年當月營收']
+                            # 清洗欄位名稱 (去除空白與不可見字元)
+                            t_df.columns = [re.sub(r'\s+', '', str(c)) for c in t_df.columns]
                             
-                            month_dfs.append(t_df[['公司代號', '公司名稱', 'yoy']])
-                    except Exception as e:
-                        continue
+                            # 定義必要欄位
+                            c_id = '公司代號'
+                            c_name = '公司名稱'
+                            c_rev = '營業收入-當月營收'
+                            c_rev_ly = '營業收入-去年當月營收'
+                            
+                            # 檢查欄位是否存在
+                            if all(col in t_df.columns for col in [c_id, c_name, c_rev, c_rev_ly]):
+                                # 轉換數值並過濾掉非法資料
+                                t_df[c_id] = t_df[c_id].astype(str).str.strip()
+                                for col in [c_rev, c_rev_ly]:
+                                    t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                                
+                                # 計算當月年增率 (YoY)
+                                t_df['yoy'] = (t_df[c_rev] - t_df[c_rev_ly]) / t_df[c_rev_ly]
+                                
+                                # 僅保留核心欄位，並去除重複
+                                sub_df = t_df[[c_id, c_name, 'yoy']].drop_duplicates(c_id)
+                                processed_dfs.append(sub_df)
+                        except Exception as e:
+                            st.error(f"讀取 {os.path.basename(f)} 失敗: {e}")
+                            continue
 
-                if len(month_dfs) == 3:
-                    # 合併三個月份的 YoY
-                    m1 = month_dfs[0].rename(columns={'yoy': 'yoy1'})
-                    m2 = month_dfs[1].rename(columns={'yoy': 'yoy2'})
-                    m3 = month_dfs[2].rename(columns={'yoy': 'yoy3'})
+                if len(processed_dfs) == 3:
+                    # 合併三個月份的年增率數據
+                    m1, m2, m3 = processed_dfs[0], processed_dfs[1], processed_dfs[2]
+                    merged = m1.rename(columns={'yoy': 'yoy1'})
+                    merged = merged.merge(m2[[ '公司代號', 'yoy' ]].rename(columns={'yoy': 'yoy2'}), on='公司代號')
+                    merged = merged.merge(m3[[ '公司代號', 'yoy' ]].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                     
-                    merged = m1.merge(m2[['公司代號', 'yoy2']], on='公司代號', how='inner')
-                    merged = merged.merge(m3[['公司代號', 'yoy3']], on='公司代號', how='inner')
-                    
-                    # 計算近三月平均年增率
-                    merged['avg_yoy'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
+                    # 計算三月平均年增率
+                    merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                     
                     # 篩選 > 20%
-                    targets = merged[merged['avg_yoy'] > 20].copy()
+                    targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
-                        st.info("💡 目前無符合近三月平均年增率 > 20% 的個股。")
-                        st.session_state.scan_results = None
+                        st.info("目前無符合近三月平均年增率 > 20% 的公司。")
                     else:
                         rev_results = []
                         for _, row in targets.iterrows():
@@ -297,23 +306,21 @@ elif mode == "營收動能策略":
                                 rev_results.append({
                                     "市場": m_type,
                                     "代號": code, "名稱": row['公司名稱'], 
-                                    "三月均年增%": f"{row['avg_yoy']:.1f}%",
+                                    "三月均增%": f"{row['avg_growth']:.1f}%",
                                     "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
                                     "成交值(億)": round(vol_amt, 1),
                                     "產業排位": info["產業排位"], "族群細分": info["族群細分"]
                                 })
                         st.session_state.scan_results = pd.DataFrame(rev_results)
-                        st.rerun()
 
 # --- 9. 顯示結果 ---
 if st.session_state.scan_results is not None:
     st.markdown("### 📊 掃描結果清單")
-    df_display = st.session_state.scan_results.copy()
-    cols = df_display.columns.tolist()
+    cols = st.session_state.scan_results.columns.tolist()
     if "市場" in cols:
         cols.insert(0, cols.pop(cols.index("市場")))
-        df_display = df_display[cols]
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
+        st.session_state.scan_results = st.session_state.scan_results[cols]
+    st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
