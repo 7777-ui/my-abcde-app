@@ -10,8 +10,8 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
-@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
+# --- 0. 🚀 即時數據抓取函數 ---
+@st.cache_data(ttl=10)
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -69,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -217,9 +217,9 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ /optimize: 修改為近三月平均年增率) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已修正為 3月平均 YoY 算法) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data/` 提取最新三月資料，計算平均 YoY 年增率。")
+    st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料並計算平均年增率 (YoY)。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
@@ -238,34 +238,36 @@ elif mode == "營收動能策略":
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 定義 YoY 需要的欄位
-                        cur_col = '營業收入-當月營收'
-                        last_col = '去年同月營收'
+                        # 定義需要的欄位：公司代號、公司名稱、當月營收、去年當月營收
+                        col_id = '公司代號'
+                        col_name = '公司名稱'
+                        col_curr = '營業收入-當月營收'
+                        col_last = '營業收入-去年當月營收'
                         
-                        if '公司代號' in t_df.columns and cur_col in t_df.columns and last_col in t_df.columns:
-                            t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
-                            t_df[cur_col] = pd.to_numeric(t_df[cur_col].astype(str).str.replace(',', ''), errors='coerce')
-                            t_df[last_col] = pd.to_numeric(t_df[last_col].astype(str).str.replace(',', ''), errors='coerce')
+                        if all(col in t_df.columns for col in [col_id, col_curr, col_last]):
+                            t_df[col_id] = t_df[col_id].astype(str).str.strip()
+                            # 數值清理
+                            for c in [col_curr, col_last]:
+                                t_df[c] = pd.to_numeric(t_df[c].astype(str).str.replace(',', ''), errors='coerce')
                             
-                            # 計算單月 YoY
-                            t_df['single_yoy'] = (t_df[cur_col] - t_df[last_col]) / t_df[last_col]
-                            t_df = t_df.dropna(subset=['公司代號', 'single_yoy'])
-                            month_dfs.append(t_df[['公司代號', '公司名稱', 'single_yoy']])
+                            t_df = t_df.dropna(subset=[col_id, col_curr, col_last])
+                            # 計算該月 YoY
+                            t_df['yoy'] = (t_df[col_curr] - t_df[col_last]) / t_df[col_last]
+                            month_dfs.append(t_df[[col_id, col_name, 'yoy']])
                     except: continue
 
                 if len(month_dfs) == 3:
-                    # 合併三個月的 YoY 數據
-                    m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    m1 = m1.drop_duplicates('公司代號').rename(columns={'single_yoy': 'yoy1'})
-                    m2 = m2.drop_duplicates('公司代號').rename(columns={'single_yoy': 'yoy2'})
-                    m3 = m3.drop_duplicates('公司代號').rename(columns={'single_yoy': 'yoy3'})
+                    # 依公司代號合併三個月的 YoY 資料
+                    m1 = month_dfs[0].drop_duplicates('公司代號').rename(columns={'yoy': 'yoy1'})
+                    m2 = month_dfs[1].drop_duplicates('公司代號').rename(columns={'yoy': 'yoy2'})
+                    m3 = month_dfs[2].drop_duplicates('公司代號').rename(columns={'yoy': 'yoy3'})
                     
                     merged = m1.merge(m2[['公司代號', 'yoy2']], on='公司代號').merge(m3[['公司代號', 'yoy3']], on='公司代號')
                     
-                    # 計算近三月平均 YoY (%)
+                    # 計算三月平均 YoY (%)
                     merged['avg_yoy'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                     
-                    # 過濾條件：平均年增率 > 20%
+                    # 篩選平均 YoY > 20%
                     targets = merged[merged['avg_yoy'] > 20].copy()
                     
                     if targets.empty:
