@@ -10,8 +10,8 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
-@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
+# --- 0. 🚀 即時數據抓取函數 ---
+@st.cache_data(ttl=10)
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -19,6 +19,7 @@ def get_realtime_price(stock_id):
     url = f"https://tw.stock.yahoo.com/quote/{target}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
+        # 修正：移除不必要的空格
         response = requests.get(url, headers=headers, timeout=5)
         patterns = [r'"regularMarketPrice":\s*([0-9.]+)', r'"price":\s*"([0-9,.]+)"']
         for p in patterns:
@@ -69,7 +70,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -217,48 +218,54 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 修正：按檔名排序並正確計算三月 YoY) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已修改計算算法與欄位) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 系統將自動抓取 2026 最新月份 CSV 資料進行 YoY 分析。")
+    st.sidebar.info("💡 核心算法：(當月營收 - 去年同月) / 去年同月 = 單月 YoY，取最新三月平均。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
-        # 修改排序邏輯：按檔名倒序排，確保 202603 在 202602 前面，而不是依據檔案修改時間
-        all_files.sort(reverse=True) 
+        all_files.sort(reverse=True) # 檔名倒序排列，確保分析近三月
         
         if len(all_files) < 3:
-            st.warning("⚠️ 資料夾內檔案不足 3 份，無法進行三月均增分析。")
+            st.warning("⚠️ 資料夾內檔案不足 3 份。")
         else:
             recent_files = all_files[:3]
             month_dfs = []
             
-            with st.spinner(f"正在分析最新月份: {[os.path.basename(f) for f in recent_files]}"):
+            with st.spinner(f"分析中: {[os.path.basename(f) for f in recent_files]}"):
                 for f in recent_files:
                     try:
                         try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 關鍵欄位定義
+                        # 指定欄位
                         id_col = '公司代號'
                         name_col = '公司名稱'
-                        yoy_col = '上月比較增減(%)' # 抓取 CSV 內建的去年同月增減幅度
+                        cur_rev_col = '營業收入-當月營收'
+                        last_rev_col = '營業收入-去年當月營收'
                         
-                        if id_col in t_df.columns and yoy_col in t_df.columns:
+                        if all(c in t_df.columns for c in [id_col, cur_rev_col, last_rev_col]):
                             t_df[id_col] = t_df[id_col].astype(str).str.strip()
-                            t_df[yoy_col] = pd.to_numeric(t_df[yoy_col].astype(str).str.replace(',', ''), errors='coerce')
-                            t_df = t_df.dropna(subset=[id_col, yoy_col])
-                            month_dfs.append(t_df[[id_col, name_col, yoy_col]])
+                            # 數值清理
+                            for col in [cur_rev_col, last_rev_col]:
+                                t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                            
+                            t_df = t_df.dropna(subset=[id_col, cur_rev_col, last_rev_col])
+                            
+                            # 算法：計算該檔案當月的 YoY (%)
+                            t_df['single_yoy'] = (t_df[cur_rev_col] - t_df[last_rev_col]) / t_df[last_rev_col] * 100
+                            month_dfs.append(t_df[[id_col, name_col, 'single_yoy']])
                     except: continue
 
                 if len(month_dfs) == 3:
-                    # 合併三個月的 YoY 數據
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    merged = m1.rename(columns={'上月比較增減(%)': 'yoy1'})
-                    merged = merged.merge(m2[['公司代號', '上月比較增減(%)']].rename(columns={'上月比較增減(%)': 'yoy2'}), on='公司代號')
-                    merged = merged.merge(m3[['公司代號', '上月比較增減(%)']].rename(columns={'上月比較增減(%)': 'yoy3'}), on='公司代號')
+                    # 以第一個月(最新月)為基準進行合併
+                    merged = m1.rename(columns={'single_yoy': 'yoy1'})
+                    merged = merged.merge(m2[[id_col, 'single_yoy']].rename(columns={'single_yoy': 'yoy2'}), on=id_col)
+                    merged = merged.merge(m3[[id_col, 'single_yoy']].rename(columns={'single_yoy': 'yoy3'}), on=id_col)
                     
-                    # 計算近三月平均年增率
+                    # 計算三月平均 YoY
                     merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
@@ -267,7 +274,7 @@ elif mode == "營收動能策略":
                     else:
                         rev_results = []
                         for _, row in targets.iterrows():
-                            code = row['公司代號']
+                            code = row[id_col]
                             info = stock_info_map.get(code, {"市場": "未知", "產業排位": "-", "族群細分": "-"})
                             p_curr = get_realtime_price(code)
                             if not p_curr: continue
@@ -286,7 +293,7 @@ elif mode == "營收動能策略":
                                 
                                 rev_results.append({
                                     "市場": m_type,
-                                    "代號": code, "名稱": row['公司名稱'], 
+                                    "代號": code, "名稱": row[name_col], 
                                     "三月均增%": f"{row['avg_growth']:.1f}%",
                                     "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
                                     "成交值(億)": round(vol_amt, 1),
