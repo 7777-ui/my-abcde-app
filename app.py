@@ -19,7 +19,6 @@ def get_realtime_price(stock_id):
     url = f"https://tw.stock.yahoo.com/quote/{target}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
-        # 修正：移除不必要的空格
         response = requests.get(url, headers=headers, timeout=5)
         patterns = [r'"regularMarketPrice":\s*([0-9.]+)', r'"price":\s*"([0-9,.]+)"']
         for p in patterns:
@@ -224,7 +223,8 @@ elif mode == "營收動能策略":
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
-        all_files.sort(reverse=True) # 檔名倒序排列，確保分析近三月
+        # 依照檔名倒序排列，確保 [0] 是最新月, [1] 是次新月, [2] 是前前月
+        all_files.sort(reverse=True) 
         
         if len(all_files) < 3:
             st.warning("⚠️ 資料夾內檔案不足 3 份。")
@@ -232,49 +232,54 @@ elif mode == "營收動能策略":
             recent_files = all_files[:3]
             month_dfs = []
             
-            with st.spinner(f"分析中: {[os.path.basename(f) for f in recent_files]}"):
+            with st.spinner(f"正在清洗並分析最新三月檔案: {[os.path.basename(f) for f in recent_files]}"):
                 for f in recent_files:
                     try:
                         try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                         except: t_df = pd.read_csv(f, encoding='cp950')
+                        
+                        # 欄位清洗
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 指定欄位
-                        id_col = '公司代號'
-                        name_col = '公司名稱'
-                        cur_rev_col = '營業收入-當月營收'
-                        last_rev_col = '營業收入-去年當月營收'
+                        # 指定計算所需欄位
+                        needed_cols = ['公司代號', '公司名稱', '營業收入-當月營收', '營業收入-去年當月營收']
                         
-                        if all(c in t_df.columns for c in [id_col, cur_rev_col, last_rev_col]):
-                            t_df[id_col] = t_df[id_col].astype(str).str.strip()
-                            # 數值清理
-                            for col in [cur_rev_col, last_rev_col]:
-                                t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                        if all(col in t_df.columns for col in needed_cols):
+                            t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
                             
-                            t_df = t_df.dropna(subset=[id_col, cur_rev_col, last_rev_col])
+                            # 數值型態轉換與清理
+                            for rev_col in ['營業收入-當月營收', '營業收入-去年當月營收']:
+                                t_df[rev_col] = pd.to_numeric(t_df[rev_col].astype(str).str.replace(',', ''), errors='coerce')
                             
-                            # 算法：計算該檔案當月的 YoY (%)
-                            t_df['single_yoy'] = (t_df[cur_rev_col] - t_df[last_rev_col]) / t_df[last_rev_col] * 100
-                            month_dfs.append(t_df[[id_col, name_col, 'single_yoy']])
+                            t_df = t_df.dropna(subset=['公司代號', '營業收入-當月營收', '營業收入-去年當月營收'])
+                            
+                            # 計算該月 YoY (%)
+                            t_df['monthly_yoy'] = (t_df['營業收入-當月營收'] - t_df['營業收入-去年當月營營收']) / t_df['營業收入-去年當月營收'] * 100
+                            
+                            # 僅保留核心識別與計算結果，並去重
+                            month_dfs.append(t_df[['公司代號', '公司名稱', 'monthly_yoy']].drop_duplicates('公司代號'))
                     except: continue
 
                 if len(month_dfs) == 3:
-                    m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    # 以第一個月(最新月)為基準進行合併
-                    merged = m1.rename(columns={'single_yoy': 'yoy1'})
-                    merged = merged.merge(m2[[id_col, 'single_yoy']].rename(columns={'single_yoy': 'yoy2'}), on=id_col)
-                    merged = merged.merge(m3[[id_col, 'single_yoy']].rename(columns={'single_yoy': 'yoy3'}), on=id_col)
+                    # 合併三個月的單月 YoY
+                    m1 = month_dfs[0].rename(columns={'monthly_yoy': 'yoy1'})
+                    m2 = month_dfs[1][['公司代號', 'monthly_yoy']].rename(columns={'monthly_yoy': 'yoy2'})
+                    m3 = month_dfs[2][['公司代號', 'monthly_yoy']].rename(columns={'monthly_yoy': 'yoy3'})
                     
-                    # 計算三月平均 YoY
+                    merged = m1.merge(m2, on='公司代號').merge(m3, on='公司代號')
+                    
+                    # 計算三月平均 YoY 動能
                     merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3
+                    
+                    # 篩選動能核心：平均年增率 > 20%
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
-                        st.info("目前無符合平均年增率 (YoY) > 20% 的公司。")
+                        st.info("目前無符合「三月平均 YoY > 20%」的公司。")
                     else:
                         rev_results = []
                         for _, row in targets.iterrows():
-                            code = row[id_col]
+                            code = row['公司代號']
                             info = stock_info_map.get(code, {"市場": "未知", "產業排位": "-", "族群細分": "-"})
                             p_curr = get_realtime_price(code)
                             if not p_curr: continue
@@ -293,7 +298,7 @@ elif mode == "營收動能策略":
                                 
                                 rev_results.append({
                                     "市場": m_type,
-                                    "代號": code, "名稱": row[name_col], 
+                                    "代號": code, "名稱": row['公司名稱'], 
                                     "三月均增%": f"{row['avg_growth']:.1f}%",
                                     "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
                                     "成交值(億)": round(vol_amt, 1),
