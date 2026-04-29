@@ -217,9 +217,9 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已修改計算算法與欄位) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已修改計算算法與強制欄位) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 核心算法：(當月營收 - 去年同月) / 去年同月 = 單月 YoY，取最新三月平均。")
+    st.sidebar.info("💡 核心算法：提取最新三個月 YoY 並計算平均成長率是否 > 20%。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
@@ -232,46 +232,45 @@ elif mode == "營收動能策略":
             recent_files = all_files[:3]
             month_dfs = []
             
-            with st.spinner(f"正在清洗並分析最新三月檔案: {[os.path.basename(f) for f in recent_files]}"):
+            with st.spinner(f"正在強制提取並分析最新三月檔案: {[os.path.basename(f) for f in recent_files]}"):
                 for f in recent_files:
                     try:
                         try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         
-                        # 欄位清洗
+                        # 清理欄位空白
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 指定計算所需欄位
-                        needed_cols = ['公司代號', '公司名稱', '營業收入-當月營收', '營業收入-去年當月營收']
-                        
-                        if all(col in t_df.columns for col in needed_cols):
+                        # 檢查必要欄位
+                        needed = ['公司代號', '公司名稱', '營業收入-當月營收', '營業收入-去年當月營收']
+                        if all(col in t_df.columns for col in needed):
                             t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
                             
-                            # 數值型態轉換與清理
+                            # 轉換數值
                             for rev_col in ['營業收入-當月營收', '營業收入-去年當月營收']:
                                 t_df[rev_col] = pd.to_numeric(t_df[rev_col].astype(str).str.replace(',', ''), errors='coerce')
                             
                             t_df = t_df.dropna(subset=['公司代號', '營業收入-當月營收', '營業收入-去年當月營收'])
                             
                             # 計算該月 YoY (%)
-                            t_df['monthly_yoy'] = (t_df['營業收入-當月營收'] - t_df['營業收入-去年當月營營收']) / t_df['營業收入-去年當月營收'] * 100
+                            t_df['monthly_yoy'] = (t_df['營業收入-當月營收'] - t_df['營業收入-去年當月營收']) / t_df['營業收入-去年當月營收'] * 100
                             
                             # 僅保留核心識別與計算結果，並去重
                             month_dfs.append(t_df[['公司代號', '公司名稱', 'monthly_yoy']].drop_duplicates('公司代號'))
                     except: continue
 
                 if len(month_dfs) == 3:
-                    # 合併三個月的單月 YoY
+                    # 合併三個月資料進行平均計算
                     m1 = month_dfs[0].rename(columns={'monthly_yoy': 'yoy1'})
                     m2 = month_dfs[1][['公司代號', 'monthly_yoy']].rename(columns={'monthly_yoy': 'yoy2'})
                     m3 = month_dfs[2][['公司代號', 'monthly_yoy']].rename(columns={'monthly_yoy': 'yoy3'})
                     
                     merged = m1.merge(m2, on='公司代號').merge(m3, on='公司代號')
                     
-                    # 計算三月平均 YoY 動能
+                    # 計算三月平均 YoY 成長
                     merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3
                     
-                    # 篩選動能核心：平均年增率 > 20%
+                    # 篩選核心：平均年增率 > 20%
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
