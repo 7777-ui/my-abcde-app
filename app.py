@@ -214,58 +214,59 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (REFACTORED: 解決空白問題) ---
+# --- 8. 營收動能策略邏輯 (🛠️ /optimize: 多檔案環境兼容版) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 讀取 revenue_data/ 內近三月 CSV 分析。")
+    st.sidebar.info("💡 偵測 `revenue_data/` 中海量資料並自動提取最新三月資料。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
-        all_files = sorted(glob.glob(os.path.join(folder, "*.csv")), reverse=True)
+        # 抓取所有 CSV 並透過修改時間或檔案名稱排序，確保拿到最新的三個月
+        all_files = glob.glob(os.path.join(folder, "*.csv"))
+        all_files.sort(key=os.path.getmtime, reverse=True) # 優先依檔案最後修改時間排序
         
         if len(all_files) < 3:
-            st.warning("⚠️ CSV 檔案不足三個月（需三份檔案），請檢查資料夾。")
+            st.warning("⚠️ 資料夾內檔案不足 3 份。")
         else:
+            # 我們需要的是「最近三個不同的月份」
             recent_files = all_files[:3]
             month_dfs = []
             
-            with st.spinner("🔍 數據清洗與對齊中..."):
+            with st.spinner(f"正在分析最新檔案: {[os.path.basename(f) for f in recent_files]}"):
                 for f in recent_files:
                     try:
-                        # 解決編碼問題
                         try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         
-                        # 1. 欄位清洗 (Remove whitespace)
                         t_df.columns = [c.strip() for c in t_df.columns]
-                        
-                        # 2. 核心欄位對齊 (只保留必要資訊)
                         target_col = '營業收入-當月營收'
+                        
                         if '公司代號' in t_df.columns and target_col in t_df.columns:
                             t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
-                            # 3. 處理數值格式 (移除逗號並轉數值)
                             t_df[target_col] = pd.to_numeric(t_df[target_col].astype(str).str.replace(',', ''), errors='coerce')
+                            # 過濾掉無意義的行（如總計）
+                            t_df = t_df.dropna(subset=['公司代號', target_col])
                             month_dfs.append(t_df[['公司代號', '公司名稱', target_col]])
-                    except Exception as e:
-                        st.error(f"檔案 {f} 讀取異常: {e}")
+                    except: continue
 
                 if len(month_dfs) == 3:
-                    # 4. 進行三個月合併 (Inner Join)
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    m1 = m1.drop_duplicates(subset=['公司代號'])
+                    # 資料去重確保 Join 正確
+                    m1 = m1.drop_duplicates('公司代號')
+                    m2 = m2.drop_duplicates('公司代號')
+                    m3 = m3.drop_duplicates('公司代號')
                     
                     merged = m1.rename(columns={'營業收入-當月營收': 'rev1'})
                     merged = merged.merge(m2[['公司代號', '營業收入-當月營收']].rename(columns={'營業收入-當月營收': 'rev2'}), on='公司代號')
                     merged = merged.merge(m3[['公司代號', '營業收入-當月營收']].rename(columns={'營業收入-當月營收': 'rev3'}), on='公司代號')
                     
-                    # 5. 計算動能增長率
+                    # 計算增長率平均值
                     merged['g1'] = (merged['rev1'] - merged['rev2']) / merged['rev2']
                     merged['g2'] = (merged['rev2'] - merged['rev3']) / merged['rev3']
                     merged['avg_growth'] = (merged['g1'] + merged['g2']) / 2 * 100
                     
-                    # 6. 篩選門檻 > 20%
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
-                        st.info("💡 目前無符合平均增長 > 20% 的標的。")
+                        st.info("目前無符合平均增長率 > 20% 的公司。")
                     else:
                         rev_results = []
                         for _, row in targets.iterrows():
@@ -285,7 +286,7 @@ elif mode == "營收動能策略":
                                 
                                 rev_results.append({
                                     "代號": code, "名稱": info["簡稱"], 
-                                    "三月平均增長%": f"{row['avg_growth']:.2f}%",
+                                    "三月均增%": f"{row['avg_growth']:.1f}%",
                                     "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
                                     "成交值(億)": round(vol_amt, 1),
                                     "產業排位": info["產業排位"], "族群細分": info["族群細分"]
