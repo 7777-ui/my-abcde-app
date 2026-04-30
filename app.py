@@ -33,7 +33,7 @@ def get_realtime_price(stock_id):
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
-# --- 1. 網頁配置與背景設置 (保持原有樣式) ---
+# --- 1. 網頁配置與背景設置 ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
@@ -118,7 +118,7 @@ def get_market_env():
 
 m_env = get_market_env()
 
-# --- 5. 主畫面與側邊欄 ---
+# --- 5. 主畫面 ---
 st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
 tw_tz = pytz.timezone('Asia/Taipei')
 st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}**")
@@ -126,99 +126,97 @@ st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %
 st.sidebar.title("🛠️ 策略切換")
 mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營收動能策略"])
 
-# --- 8. 營收動能策略邏輯 (🛠️ /refactor: 雙目錄 + 檔名倒序) ---
+# --- 8. 營收動能策略 (🛠️ 重大修正：分資料夾與倒序排列) ---
 if mode == "營收動能策略":
-    st.sidebar.info("💡 獨立從 TWSE 與 TPEX 資料夾抓取最新三月資料。")
+    st.sidebar.info("💡 獨立分析 TWSE 與 TPEX 資料夾最新 3 個月營收。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         
-        all_market_targets = []
-        market_folders = [("revenue_data_TWSE", "上市"), ("revenue_data_TPEX", "上櫃")]
+        final_list = []
+        # 定義市場資料夾配置
+        market_configs = [
+            ("revenue_data_TWSE", "上市", ".TW"),
+            ("revenue_data_TPEX", "上櫃", ".TWO")
+        ]
 
-        with st.spinner("跨市場營收數據處理中..."):
-            for folder_path, m_label in market_folders:
-                if not os.path.exists(folder_path):
-                    st.warning(f"⚠️ 找不到路徑: {folder_path}")
-                    continue
-                
-                # 使用檔名倒序排列 (確保日期最大在前)
-                all_csvs = sorted(glob.glob(os.path.join(folder_path, "*.csv")), reverse=True)
-                
-                if len(all_csvs) < 3:
-                    st.warning(f"⚠️ {m_label} 資料夾內 CSV 不足 3 份。")
-                    continue
-                
-                recent_files = all_csvs[:3]
-                month_dfs = []
-                
-                for f in recent_files:
-                    try:
-                        try: t_df = pd.read_csv(f, encoding='utf-8-sig')
-                        except: t_df = pd.read_csv(f, encoding='cp950')
-                        
-                        t_df.columns = [c.strip() for c in t_df.columns]
-                        
-                        # 強制提取核心欄位
-                        col_map = {
-                            '公司代號': 'ID',
-                            '公司名稱': 'Name',
-                            '營業收入-去年同月增減(%)': 'YoY_Pct'
-                        }
-                        # 檢查欄位是否存在
-                        available_cols = [c for c in col_map.keys() if c in t_df.columns]
-                        t_df = t_df[available_cols].rename(columns=col_map)
-                        
-                        if 'ID' in t_df.columns and 'YoY_Pct' in t_df.columns:
-                            t_df['ID'] = t_df['ID'].astype(str).str.strip()
-                            t_df['YoY_Pct'] = pd.to_numeric(t_df['YoY_Pct'], errors='coerce')
-                            month_dfs.append(t_df.drop_duplicates('ID'))
-                    except: continue
+        for folder, m_label, suffix in market_configs:
+            if not os.path.exists(folder):
+                st.error(f"❌ 找不到資料夾: {folder}")
+                continue
+            
+            # 檔名倒序排序，抓取最新 3 個 CSV
+            all_files = sorted(glob.glob(os.path.join(folder, "*.csv")), reverse=True)
+            
+            if len(all_files) < 3:
+                st.warning(f"⚠️ {m_label} 資料不足 3 份，跳過。")
+                continue
+            
+            recent_files = all_files[:3]
+            month_dfs = []
 
-                if len(month_dfs) == 3:
-                    # 合併三個月份 (各自合併)
-                    m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    merged = m1.rename(columns={'YoY_Pct': 'y1'})
-                    merged = merged.merge(m2[['ID', 'YoY_Pct']].rename(columns={'YoY_Pct': 'y2'}), on='ID')
-                    merged = merged.merge(m3[['ID', 'YoY_Pct']].rename(columns={'YoY_Pct': 'y3'}), on='ID')
+            for f in recent_files:
+                try:
+                    try: t_df = pd.read_csv(f, encoding='utf-8-sig')
+                    except: t_df = pd.read_csv(f, encoding='cp950')
                     
-                    # 計算近三月平均年增率
-                    merged['avg_growth'] = (merged['y1'] + merged['y2'] + merged['y3']) / 3
+                    t_df.columns = [c.strip() for c in t_df.columns]
                     
-                    # 篩選 > 20%
-                    targets = merged[merged['avg_growth'] > 20].copy()
-                    
-                    for _, row in targets.iterrows():
-                        code = row['ID']
-                        info = stock_info_map.get(code, {"市場": m_label, "產業排位": "-", "族群細分": "-"})
-                        p_curr = get_realtime_price(code)
-                        if not p_curr: continue
-                        
-                        # 補齊漲幅與量
-                        suffix = ".TW" if m_label == "上市" else ".TWO"
-                        df_h = get_historical_data(f"{code}{suffix}")
-                        if not df_h.empty:
-                            if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
-                            p_yest = float(df_h['Close'].iloc[-1])
-                            chg = (p_curr - p_yest) / p_yest
-                            vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
-                            
-                            all_market_targets.append({
-                                "市場": m_label,
-                                "代號": code, "名稱": row['Name'], 
-                                "三月均年增%": f"{row['avg_growth']:.1f}%",
-                                "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
-                                "成交值(億)": round(vol_amt, 1),
-                                "產業排位": info.get("產業排位", "-"), 
-                                "族群細分": info.get("族群細分", "-")
-                            })
+                    # 強制提取指定 4 個欄位 (或根據 CSV 實際名稱微調)
+                    target_cols = {
+                        '資料年月': 'Date',
+                        '公司代號': 'ID',
+                        '公司名稱': 'Name',
+                        '營業收入-去年同月增減(%)': 'YoY'
+                    }
+                    # 檢查欄位是否存在，不存在則跳過
+                    if all(c in t_df.columns for c in target_cols.keys()):
+                        t_df = t_df[list(target_cols.keys())].rename(columns=target_cols)
+                        t_df['ID'] = t_df['ID'].astype(str).str.strip()
+                        t_df['YoY'] = pd.to_numeric(t_df['YoY'], errors='coerce')
+                        month_dfs.append(t_df.drop_duplicates('ID'))
+                except: continue
 
-            if all_market_targets:
-                st.session_state.scan_results = pd.DataFrame(all_market_targets)
-            else:
-                st.info("查無符合條件之個股。")
+            if len(month_dfs) == 3:
+                # 合併三個月資料計算平均
+                m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
+                merged = m1.merge(m2[['ID', 'YoY']], on='ID', suffixes=('', '2'))
+                merged = merged.merge(m3[['ID', 'YoY']], on='ID', suffixes=('', '3'))
+                merged['avg_growth'] = (merged['YoY'] + merged['YoY2'] + merged['YoY3']) / 3
+                
+                # 篩選平均年增 > 20%
+                targets = merged[merged['avg_growth'] > 20].copy()
+                
+                for _, row in targets.iterrows():
+                    code = row['ID']
+                    p_curr = get_realtime_price(code)
+                    if not p_curr: continue
+                    
+                    # 取得即時技術面數據
+                    df_h = get_historical_data(f"{code}{suffix}")
+                    if not df_h.empty:
+                        if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
+                        p_yest = float(df_h['Close'].iloc[-1])
+                        chg = (p_curr - p_yest) / p_yest
+                        vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
+                        
+                        info = stock_info_map.get(code, {})
+                        final_list.append({
+                            "市場": m_label,
+                            "代號": code, "名稱": row['Name'], 
+                            "三月均年增%": f"{row['avg_growth']:.1f}%",
+                            "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
+                            "成交值(億)": round(vol_amt, 1),
+                            "產業排位": info.get("產業排位", "-"),
+                            "族群細分": info.get("族群細分", "-")
+                        })
+        
+        if final_list:
+            st.session_state.scan_results = pd.DataFrame(final_list)
+        else:
+            st.info("查無符合營收動能之個股。")
 
 # --- 9. 顯示結果 ---
 if st.session_state.scan_results is not None:
-    st.markdown("### 📊 營收動能掃描結果")
+    st.markdown("### 📊 掃描結果")
     st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
 
 if st.sidebar.button("🔐 安全登出"):
