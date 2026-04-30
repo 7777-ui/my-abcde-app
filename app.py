@@ -216,19 +216,19 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (分資料夾各自倒序抓取) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 修正路徑與檔名倒序) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 分別從 `revenue_data_TWSE` 與 `revenue_data_TPEX` 提取最新三月資料。")
+    st.sidebar.info("💡 採用資料夾分流：分別讀取 `revenue_data_TWSE` 與 `revenue_data_TPEX`。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         
-        # 定義核心處理函數
-        def process_market_folder(folder_path, market_label):
+        # 封裝核心處理邏輯
+        def get_filtered_stocks(folder_path, market_name):
             files = glob.glob(os.path.join(folder_path, "*.csv"))
-            # 依檔名倒序排列 (確保抓到最新月份)
-            files.sort(reverse=True)
+            # 關鍵修正：改用檔名倒序排列，確保拿到最新月份
+            files.sort(reverse=True) 
             
             if len(files) < 3:
-                st.warning(f"⚠️ {market_label} 資料夾檔案不足 3 份。")
+                st.warning(f"⚠️ {market_name} 資料夾檔案不足 3 份，跳過處理。")
                 return pd.DataFrame()
             
             recent_files = files[:3]
@@ -238,8 +238,8 @@ elif mode == "營收動能策略":
                 try:
                     try: t_df = pd.read_csv(f, encoding='utf-8-sig')
                     except: t_df = pd.read_csv(f, encoding='cp950')
-                    t_df.columns = [c.strip() for c in t_df.columns]
                     
+                    t_df.columns = [c.strip() for c in t_df.columns]
                     col_code = '公司代號'
                     col_name = '公司名稱'
                     col_rev_now = '營業收入-當月營收'
@@ -251,6 +251,7 @@ elif mode == "營收動能策略":
                             t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
                         
                         t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                        # 計算 YoY
                         t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
                         month_dfs.append(t_df[[col_code, col_name, 'yoy']])
                 except: continue
@@ -262,16 +263,17 @@ elif mode == "營收動能策略":
                 merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                 merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                 targets = merged[merged['avg_growth'] > 20].copy()
-                targets['市場'] = market_label
+                targets['市場標籤'] = market_name
                 return targets
             return pd.DataFrame()
 
-        with st.spinner("正在分別掃描上市與上櫃資料夾..."):
-            df_twse = process_market_folder("revenue_data_TWSE", "上市")
-            df_tpex = process_market_folder("revenue_data_TPEX", "上櫃")
+        with st.spinner("正在分別從兩大路徑倒序提取最新營收檔案..."):
+            # 2-1 & 2-2 分別路徑處理
+            res_twse = get_filtered_stocks("revenue_data_TWSE", "上市")
+            res_tpex = get_filtered_stocks("revenue_data_TPEX", "上櫃")
             
-            # 合併兩市場結果
-            all_targets = pd.concat([df_twse, df_tpex], ignore_index=True)
+            # 2-3 整合輸出
+            all_targets = pd.concat([res_twse, res_tpex], ignore_index=True)
             
             if all_targets.empty:
                 st.info("目前無符合平均年增率 > 20% 的公司。")
@@ -279,11 +281,12 @@ elif mode == "營收動能策略":
                 rev_results = []
                 for _, row in all_targets.iterrows():
                     code = row['公司代號']
-                    info = stock_info_map.get(code, {"市場": row['市場'], "產業排位": "-", "族群細分": "-"})
+                    info = stock_info_map.get(code, {"市場": row['市場標籤'], "產業排位": "-", "族群細分": "-"})
                     p_curr = get_realtime_price(code)
                     if not p_curr: continue
                     
-                    suffix = ".TW" if row['市場'] == "上市" else ".TWO"
+                    # 依據市場標籤決定 yfinance 後綴，避免抓錯資料
+                    suffix = ".TW" if row['市場標籤'] == "上市" else ".TWO"
                     df_h = get_historical_data(f"{code}{suffix}")
                     
                     if not df_h.empty:
@@ -293,7 +296,7 @@ elif mode == "營收動能策略":
                         vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
                         
                         rev_results.append({
-                            "市場": row['市場'],
+                            "市場": row['市場標籤'],
                             "代號": code, "名稱": row['公司名稱'], 
                             "三月均年增%": f"{row['avg_growth']:.1f}%",
                             "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
