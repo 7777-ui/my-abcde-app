@@ -11,7 +11,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
-@st.cache_data(ttl=10) 
+@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -69,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 ---
+# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -132,7 +132,7 @@ st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %
 
 # --- 6. 側邊欄設定 ---
 st.sidebar.title("🛠️ 策略切換")
-mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營收動能策略"])
+mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營營收動能策略"])
 
 # --- 7. 姊布林 ABCDE 策略邏輯 ---
 if mode == "姊布林 ABCDE":
@@ -222,13 +222,12 @@ elif mode == "營收動能策略":
     st.sidebar.info("💡 分別偵測 `revenue_data_TWSE/` 與 `revenue_data_TPEX/` 檔名倒序最新三月資料。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         
-        # 定義兩個資料夾與其對應的 yfinance 後綴
         market_configs = [
             {"folder": "revenue_data_TWSE", "label": "上市", "suffix": ".TW"},
             {"folder": "revenue_data_TPEX", "label": "上櫃", "suffix": ".TWO"}
         ]
         
-        all_market_rev_results = [] # 用來存放最終兩市場的結果
+        all_market_rev_results = [] 
         
         for config in market_configs:
             folder = config["folder"]
@@ -236,7 +235,7 @@ elif mode == "營收動能策略":
                 st.warning(f"⚠️ 找不到資料夾: {folder}")
                 continue
                 
-            # 1. 檔名倒序抓取：解決「由小到大」問題，取前三名即為最新月份
+            # 檔名倒序抓取：202603.csv, 202602.csv... 取前三名即為最新
             all_files = glob.glob(os.path.join(folder, "*.csv"))
             all_files.sort(reverse=True) 
             
@@ -247,7 +246,6 @@ elif mode == "營收動能策略":
             recent_files = all_files[:3]
             month_dfs = []
             
-            # 2. 核心計算邏輯 (完全保留妳原本的處理方式)
             with st.spinner(f"正在分析 {config['label']} 最新檔案..."):
                 for f in recent_files:
                     try:
@@ -264,11 +262,11 @@ elif mode == "營收動能策略":
                                 t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
                             
                             t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                            # 計算該月年增率 (YoY)
                             t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
                             month_dfs.append(t_df[[col_code, col_name, 'yoy']])
                     except: continue
 
-                # 3. 三月合併與價格抓取
                 if len(month_dfs) == 3:
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
                     m1, m2, m3 = m1.drop_duplicates('公司代號'), m2.drop_duplicates('公司代號'), m3.drop_duplicates('公司代號')
@@ -277,6 +275,7 @@ elif mode == "營收動能策略":
                     merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
                     merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                     
+                    # 計算三月算術平均年增率
                     merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
@@ -286,7 +285,6 @@ elif mode == "營收動能策略":
                         p_curr = get_realtime_price(code)
                         if not p_curr: continue
                         
-                        # 使用正確的後綴抓取價格
                         df_h = get_historical_data(f"{code}{config['suffix']}")
                         if not df_h.empty:
                             if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
@@ -303,7 +301,6 @@ elif mode == "營收動能策略":
                                 "產業排位": info["產業排位"], "族群細分": info["族群細分"]
                             })
 
-        # --- 4. 統一輸出 (Concat 結果) ---
         if all_market_rev_results:
             st.session_state.scan_results = pd.DataFrame(all_market_rev_results)
         else:
