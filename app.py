@@ -217,7 +217,7 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已優化為：近三月算術平均年增率 YoY) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已修改為：近三月算術平均年增率 YoY) ---
 elif mode == "營收動能策略":
     st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料並計算「平均年增率 YoY > 20%」。")
     if st.sidebar.button("📊 啟動營收動能分析"):
@@ -238,19 +238,18 @@ elif mode == "營收動能策略":
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 核心計算欄位：當月營收 vs 去年當月營收
+                        # 核心修復：同時提取當月與去年當月營收
                         cur_col = '營業收入-當月營收'
                         last_col = '營業收入-去年當月營收'
                         
                         if '公司代號' in t_df.columns and cur_col in t_df.columns and last_col in t_df.columns:
                             t_df['公司代號'] = t_df['公司代號'].astype(str).str.strip()
-                            # 數值清理
                             t_df[cur_col] = pd.to_numeric(t_df[cur_col].astype(str).str.replace(',', ''), errors='coerce')
                             t_df[last_col] = pd.to_numeric(t_df[last_col].astype(str).str.replace(',', ''), errors='coerce')
                             t_df = t_df.dropna(subset=['公司代號', cur_col, last_col])
                             
-                            # 計算單月 YoY 年增率 ( (當月 - 去年同月) / 去年同月 )
-                            t_df['yoy_val'] = (t_df[cur_col] - t_df[last_col]) / t_df[last_col].abs()
+                            # 算出該月單月的 YoY
+                            t_df['yoy_val'] = (t_df[cur_col] - t_df[last_col]) / t_df[last_col]
                             month_dfs.append(t_df[['公司代號', '公司名稱', 'yoy_val']])
                     except: continue
 
@@ -258,12 +257,12 @@ elif mode == "營收動能策略":
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
                     m1, m2, m3 = m1.drop_duplicates('公司代號'), m2.drop_duplicates('公司代號'), m3.drop_duplicates('公司代號')
                     
-                    # 合併三個月份的 YoY
+                    # 合併三個月份的 YoY 數據
                     merged = m1.rename(columns={'yoy_val': 'yoy1'})
                     merged = merged.merge(m2[['公司代號', 'yoy_val']].rename(columns={'yoy_val': 'yoy2'}), on='公司代號')
                     merged = merged.merge(m3[['公司代號', 'yoy_val']].rename(columns={'yoy_val': 'yoy3'}), on='公司代號')
                     
-                    # 計算「近三月算術平均年增率」
+                    # 計算「算術平均年增率」
                     merged['avg_yoy'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                     targets = merged[merged['avg_yoy'] > 20].copy()
                     
