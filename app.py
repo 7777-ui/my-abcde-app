@@ -10,8 +10,8 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
-@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
+# --- 0. 🚀 即時數據抓取函數 ---
+@st.cache_data(ttl=10)
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -69,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -217,63 +217,68 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已修改為 YoY 年增率計算) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 修正: 讀取 TWSE / TPEX 資料夾與檔名倒序) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料並計算平均【年增率】。")
+    st.sidebar.info("💡 偵測 `revenue_data_TWSE` 與 `revenue_data_TPEX` 最新三月資料並計算平均【年增率】。")
     if st.sidebar.button("📊 啟動營收動能分析"):
-        folder = "revenue_data"
-        all_files = glob.glob(os.path.join(folder, "*.csv"))
-        all_files.sort(key=os.path.getmtime, reverse=True) 
+        # 設定來源資料夾
+        folders = ["revenue_data_TWSE", "revenue_data_TPEX"]
+        month_dfs = [] # 用來存放三個月份合併後的 DataFrame
         
-        if len(all_files) < 3:
-            st.warning("⚠️ 資料夾內檔案不足 3 份。")
+        # 1. 抓取所有資料夾中的檔案並按檔名倒序排列 (假設檔名為日期如 2026_03.csv)
+        all_files = []
+        for fld in folders:
+            if os.path.exists(fld):
+                all_files.extend(glob.glob(os.path.join(fld, "*.csv")))
+        
+        # 依據檔案名稱倒序排列 (取最新月份)
+        all_files.sort(key=lambda x: os.path.basename(x), reverse=True)
+        
+        # 邏輯：我們需要最近的三個月份，每個月份可能分散在兩個資料夾中 (上市/上櫃)
+        # 這裡簡化邏輯：直接抓取檔名不重複的前三個月份標籤
+        unique_months = sorted(list(set([os.path.basename(f) for f in all_files])), reverse=True)[:3]
+        
+        if len(unique_months) < 3:
+            st.warning(f"⚠️ 資料檔案不足，目前僅偵測到 {len(unique_months)} 個月份。")
         else:
-            recent_files = all_files[:3]
-            month_dfs = []
-            
-            with st.spinner(f"正在分析最新檔案: {[os.path.basename(f) for f in recent_files]}"):
-                for f in recent_files:
-                    try:
-                        # 強制讀取指定欄位以進行合併計算
-                        try: t_df = pd.read_csv(f, encoding='utf-8-sig')
-                        except: t_df = pd.read_csv(f, encoding='cp950')
-                        
-                        t_df.columns = [c.strip() for c in t_df.columns]
-                        
-                        # 定義核心欄位
-                        col_code = '公司代號'
-                        col_name = '公司名稱'
-                        col_rev_now = '營業收入-當月營收'
-                        col_rev_last = '營業收入-去年當月營收'
-                        
-                        if all(col in t_df.columns for col in [col_code, col_rev_now, col_rev_last]):
-                            t_df[col_code] = t_df[col_code].astype(str).str.strip()
-                            # 數值清理
-                            for col in [col_rev_now, col_rev_last]:
-                                t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+            with st.spinner(f"正在分析月份: {unique_months}"):
+                for target_m in unique_months:
+                    m_parts = []
+                    # 找出這月份在兩個資料夾中對應的檔案
+                    target_files = [f for f in all_files if os.path.basename(f) == target_m]
+                    for f in target_files:
+                        try:
+                            try: t_df = pd.read_csv(f, encoding='utf-8-sig')
+                            except: t_df = pd.read_csv(f, encoding='cp950')
                             
-                            t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                            t_df.columns = [c.strip() for c in t_df.columns]
+                            col_code = '公司代號'
+                            col_name = '公司名稱'
+                            col_rev_now = '營業收入-當月營收'
+                            col_rev_last = '營業收入-去年當月營收'
                             
-                            # 計算該月年增率 (YoY)
-                            t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
-                            
-                            month_dfs.append(t_df[[col_code, col_name, 'yoy']])
-                    except Exception as e:
-                        continue
+                            if all(col in t_df.columns for col in [col_code, col_rev_now, col_rev_last]):
+                                t_df[col_code] = t_df[col_code].astype(str).str.strip()
+                                for col in [col_rev_now, col_rev_last]:
+                                    t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                                t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                                t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
+                                m_parts.append(t_df[[col_code, col_name, 'yoy']])
+                        except: continue
+                    
+                    if m_parts:
+                        # 將同月份的上市與上櫃資料合併
+                        month_dfs.append(pd.concat(m_parts).drop_duplicates('公司代號'))
 
                 if len(month_dfs) == 3:
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-                    m1, m2, m3 = m1.drop_duplicates('公司代號'), m2.drop_duplicates('公司代號'), m3.drop_duplicates('公司代號')
                     
-                    # 合併三個月份的年增率數據
                     merged = m1.rename(columns={'yoy': 'yoy1'})
                     merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
                     merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                     
                     # 計算三月平均年增率
                     merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
-                    
-                    # 篩選平均年增率 > 20%
                     targets = merged[merged['avg_growth'] > 20].copy()
                     
                     if targets.empty:
@@ -311,11 +316,12 @@ elif mode == "營收動能策略":
 # --- 9. 顯示結果 ---
 if st.session_state.scan_results is not None:
     st.markdown("### 📊 掃描結果清單")
-    cols = st.session_state.scan_results.columns.tolist()
+    df_display = st.session_state.scan_results.copy()
+    cols = df_display.columns.tolist()
     if "市場" in cols:
         cols.insert(0, cols.pop(cols.index("市場")))
-        st.session_state.scan_results = st.session_state.scan_results[cols]
-    st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
+        df_display = df_display[cols]
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
 
 if st.sidebar.button("🔐 安全登出"):
     st.session_state.password_correct = False
