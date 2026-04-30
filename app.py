@@ -217,7 +217,7 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已修改：分流讀取 + 檔名倒序) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已修改：雙路徑分流 + 檔名倒序) ---
 elif mode == "營收動能策略":
     st.sidebar.info("💡 採用分流路徑：分別從 `revenue_data_TWSE` 與 `revenue_data_TPEX` 提取最新三月數據。")
     if st.sidebar.button("📊 啟動營收動能分析"):
@@ -229,7 +229,7 @@ elif mode == "營收動能策略":
                 return pd.DataFrame()
                 
             all_files = glob.glob(os.path.join(folder_path, "*.csv"))
-            # 關鍵修正：改用檔名倒序排列，確保抓到最新月份
+            # 關鍵修正：改用檔名倒序排列，確保抓到最新月份檔案
             all_files.sort(reverse=True) 
             
             if len(all_files) < 3:
@@ -246,7 +246,6 @@ elif mode == "營收動能策略":
                     
                     t_df.columns = [c.strip() for c in t_df.columns]
                     col_code = '公司代號'
-                    col_name = '公司名稱'
                     col_rev_now = '營業收入-當月營收'
                     col_rev_last = '營業收入-去年當月營收'
                     
@@ -257,10 +256,11 @@ elif mode == "營收動能策略":
                         
                         t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
                         t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
-                        month_dfs.append(t_df[[col_code, col_name, 'yoy']])
+                        month_dfs.append(t_df[[col_code, 'yoy', '公司名稱']])
                 except: continue
                 
             if len(month_dfs) == 3:
+                # 統一以第一個檔案的公司清單為主進行 merge
                 m1, m2, m3 = [d.drop_duplicates('公司代號') for d in month_dfs]
                 merged = m1.rename(columns={'yoy': 'yoy1'})
                 merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
@@ -269,7 +269,7 @@ elif mode == "營收動能策略":
                 
                 # 篩選平均 YoY > 20%
                 targets = merged[merged['avg_growth'] > 20].copy()
-                targets['市場標籤'] = market_label # 標註以便後續決定 yfinance 後綴
+                targets['市場標籤'] = market_label
                 return targets
             return pd.DataFrame()
 
@@ -291,7 +291,7 @@ elif mode == "營收動能策略":
                     p_curr = get_realtime_price(code)
                     if not p_curr: continue
                     
-                    # 依據市場標籤決定 yf 後綴，避免抓不到價格
+                    # 依據標籤決定 yfinance 後綴，確保抓得到歷史數據計算漲幅
                     suffix = ".TW" if row['市場標籤'] == "上市" else ".TWO"
                     df_h = get_historical_data(f"{code}{suffix}")
                     
