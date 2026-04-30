@@ -11,7 +11,7 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
 # --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
-@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
+@st.cache_data(ttl=10) 
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -69,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
+# --- 3. 🛡️ 族群 CSV 讀取 ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -217,28 +217,25 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已優化：雙路徑分流 + 檔名倒序) ---
+# --- 8. 營收動能策略邏輯 (🛠️ /refactor: 雙路徑分流 + 檔名倒序) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data_TWSE/` 與 `revenue_data_TPEX/` 最新三月資料並計算平均【年增率】。")
+    st.sidebar.info("💡 偵測 `revenue_data_TWSE/` 與 `revenue_data_TPEX/` 最新三月資料。")
     
     if st.sidebar.button("📊 啟動營收動能分析"):
         
-        # 建立內部函數，確保上市與上櫃的計算邏輯完全沿用妳提供的原始代碼
+        # 封裝內部處理函數 (🛠️ 符合 DRY 原則)
         def process_revenue_by_market(folder_path, market_label):
-            if not os.path.exists(folder_path):
-                return pd.DataFrame()
+            if not os.path.exists(folder_path): return pd.DataFrame()
             
-            # 檔案處理：改為「檔名倒序」抓取
+            # 檔名倒序抓取 (確保日期最大者在前)
             all_files = glob.glob(os.path.join(folder_path, "*.csv"))
-            all_files.sort(reverse=True) # 檔名數字大者在前
+            all_files.sort(reverse=True) 
             
-            if len(all_files) < 3:
-                return pd.DataFrame()
+            if len(all_files) < 3: return pd.DataFrame()
             
             recent_files = all_files[:3]
             month_dfs = []
             
-            # 這裡完全沿用妳提供的核心讀取與數值處理邏輯
             for f in recent_files:
                 try:
                     try: t_df = pd.read_csv(f, encoding='utf-8-sig')
@@ -256,43 +253,38 @@ elif mode == "營收動能策略":
                         t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
                         t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
                         month_dfs.append(t_df[[col_code, col_name, 'yoy']])
-                except:
-                    continue
+                except: continue
 
-            # 進行三月合併篩選
             if len(month_dfs) == 3:
                 m1, m2, m3 = [d.drop_duplicates('公司代號') for d in month_dfs]
                 merged = m1.rename(columns={'yoy': 'yoy1'})
                 merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
                 merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
-                
                 merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
-                # 篩選 > 20%
-                market_targets = merged[merged['avg_growth'] > 20].copy()
-                market_targets['market_type'] = market_label # 標記上市或上櫃
-                return market_targets
+                targets = merged[merged['avg_growth'] > 20].copy()
+                targets['market_tag'] = market_label
+                return targets
             return pd.DataFrame()
 
-        with st.spinner("🚀 正在分別計算上市 (TWSE) 與 上櫃 (TPEX) 營收動能..."):
-            # 1. 分別讀取兩個路徑
-            df_twse = process_revenue_by_market("revenue_data_TWSE", "上市")
-            df_tpex = process_revenue_by_market("revenue_data_TPEX", "上櫃")
+        with st.spinner("🚀 分路徑掃描上市與上櫃營收數據..."):
+            # 1. 執行分路徑抓取
+            twse_targets = process_revenue_by_market("revenue_data_TWSE", "上市")
+            tpex_targets = process_revenue_by_market("revenue_data_TPEX", "上櫃")
             
-            # 2. 整合輸出結果
-            targets = pd.concat([df_twse, df_tpex], ignore_index=True)
+            # 2. 整合兩者
+            combined_targets = pd.concat([twse_targets, tpex_targets], ignore_index=True)
             
-            if targets.empty:
+            if combined_targets.empty:
                 st.info("目前無符合平均年增率 > 20% 的公司。")
             else:
                 rev_results = []
-                for _, row in targets.iterrows():
+                for _, row in combined_targets.iterrows():
                     code = row['公司代號']
                     info = stock_info_map.get(code, {"產業排位": "-", "族群細分": "-"})
                     p_curr = get_realtime_price(code)
                     if not p_curr: continue
                     
-                    # 3. 依據來源標記決定 yfinance 後綴，確保抓取成功
-                    suffix = ".TW" if row['market_type'] == "上市" else ".TWO"
+                    suffix = ".TW" if row['market_tag'] == "上市" else ".TWO"
                     df_h = get_historical_data(f"{code}{suffix}")
                     
                     if not df_h.empty:
@@ -302,7 +294,7 @@ elif mode == "營收動能策略":
                         vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
                         
                         rev_results.append({
-                            "市場": row['market_type'],
+                            "市場": row['market_tag'],
                             "代號": code, "名稱": row['公司名稱'], 
                             "三月均年增%": f"{row['avg_growth']:.1f}%",
                             "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
