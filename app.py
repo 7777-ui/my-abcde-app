@@ -10,8 +10,8 @@ import glob
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 0. 🚀 即時數據抓取函數 ---
-@st.cache_data(ttl=10)
+# --- 0. 🚀 即時數據抓取函數 (🛠️ /optimize: 加入即時價格快取) ---
+@st.cache_data(ttl=10) # 盤中 10 秒快取，避免重複請求導致 Yahoo 封鎖
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -29,6 +29,7 @@ def get_realtime_price(stock_id):
     except: pass
     return None
 
+# --- 0.1 🏎️ 歷史數據快取 ---
 @st.cache_data(ttl=3600)
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
@@ -68,7 +69,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 ---
+# --- 3. 🛡️ 族群 CSV 讀取 (🛠️ /refactor: 加入市場別識別) ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -86,14 +87,16 @@ def get_stock_info_full():
                             "簡稱": str(row.iloc[1]).strip(),
                             "市場": market_label,
                             "產業排位": str(row.iloc[2]).strip() if len(row) > 2 else "-",
-                            "族群細分": str(row.iloc[4]).strip() if len(row) > 4 else "-"
+                            "實力指標": str(row.iloc[3]).strip() if len(row) > 3 else "-",
+                            "族群細分": str(row.iloc[4]).strip() if len(row) > 4 else "-",
+                            "關鍵技術": str(row.iloc[5]).strip() if len(row) > 5 else "-"
                         }
             except: pass
     return mapping
 stock_info_map = get_stock_info_full()
 
 # --- 4. 大盤環境偵測 ---
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60) 
 def get_market_env():
     res = {}
     rt_indices = {"上市": "TSE", "上櫃": "OTC"}
@@ -105,7 +108,7 @@ def get_market_env():
             if not df_h.empty and curr_p:
                 if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
                 df_h = df_h.dropna(subset=['Close'])
-                base_list = df_h['Close'].iloc[-20:-1].tolist()
+                base_list = df_h['Close'].iloc[-20:-1].tolist() if df_h.index[-1].date() >= datetime.now().date() else df_h['Close'].iloc[-19:].tolist()
                 c_list = base_list + [curr_p]
                 m5, m20 = sum(c_list[-5:])/5, sum(c_list)/20
                 std_v = pd.Series(c_list).std()
@@ -120,69 +123,168 @@ m_env = get_market_env()
 
 # --- 5. 主畫面 ---
 st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
+m_col1, m_col2 = st.columns(2)
+with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
+with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+
 tw_tz = pytz.timezone('Asia/Taipei')
 st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}**")
 
+# --- 6. 側邊欄設定 ---
 st.sidebar.title("🛠️ 策略切換")
 mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營收動能策略"])
 
-# --- 8. 營收動能策略 (🛠️ 重大修正：分資料夾與倒序排列) ---
-if mode == "營收動能策略":
-    st.sidebar.info("💡 獨立分析 TWSE 與 TPEX 資料夾最新 3 個月營收。")
+# --- 7. 姊布林 ABCDE 策略邏輯 ---
+if mode == "姊布林 ABCDE":
+    raw_input = st.sidebar.text_area("輸入股票代碼", height=150)
+    if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
+        codes = re.findall(r'\b\d{4,6}\b', raw_input)
+        results = []
+        main_market_light = m_env['上市']['燈號']
+        
+        with st.spinner("分析環境中..."):
+            for code in codes:
+                info = stock_info_map.get(code, {"簡稱": f"台股{code}", "市場": "未知", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
+                p_curr = get_realtime_price(code)
+                if not p_curr: continue
+                
+                df = get_historical_data(f"{code}.TW")
+                m_type = "上市"
+                if df.empty or len(df) < 10:
+                    df = get_historical_data(f"{code}.TWO")
+                    m_type = "上櫃"
+
+                if not df.empty and len(df) >= 20:
+                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                    df = df.dropna(subset=['Close'])
+                    current_env = m_env[m_type]
+                    
+                    today_date = datetime.now().date()
+                    if df.index[-1].date() >= today_date:
+                        p_yest = float(df['Close'].iloc[-2])
+                        history_for_ma = df['Close'].iloc[-20:-1].tolist()
+                    else:
+                        p_yest = float(df['Close'].iloc[-1])
+                        history_for_ma = df['Close'].iloc[-19:].tolist()
+                    
+                    close_20 = history_for_ma + [p_curr]
+                    m20_now = sum(close_20) / 20
+                    std_now = pd.Series(close_20).std()
+                    upper_now = m20_now + (std_now * 2)
+                    bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
+                    chg = (p_curr - p_yest) / p_yest
+                    vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
+                    ratio = bw / current_env['帶寬'] if current_env['帶寬'] > 0 else 0
+                    slope_pos = m20_now > sum(history_for_ma) / 20
+                    break_upper = p_curr > upper_now
+                    
+                    res_tag = ""
+                    fail_reasons = []
+                    if not break_upper: fail_reasons.append("未站上軌")
+                    if not slope_pos: fail_reasons.append("斜率負")
+                    if vol_amt < 5: fail_reasons.append("量不足")
+
+                    if not fail_reasons:
+                        if "🔴 紅燈" in main_market_light:
+                            if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                            elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
+                            else: res_tag = "⚪ 參數不符(大盤紅燈限AB)"
+                        else:
+                            if "🟢 綠燈" in current_env['燈號']:
+                                env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
+                                if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：共振】"
+                                elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額】"
+                                elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                                elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
+                                elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗】"
+                            elif "🟡 黃燈" in current_env['燈號']:
+                                if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                                elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
+                            elif "🔴 紅燈" in current_env['燈號']:
+                                if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
+                        if not res_tag: res_tag = "⚪ 參數不符"
+                    else:
+                        res_tag = "⚪ " + "/".join(fail_reasons)
+
+                    results.append({
+                        "市場": m_type,
+                        "代號": code, "名稱": info["簡稱"], "策略": res_tag,
+                        "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
+                        "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
+                        "產業排位": info["產業排位"], "2026指標": info["實力指標"],
+                        "族群細分": info["族群細分"], "關鍵技術": info["關鍵技術"]
+                    })
+        if results:
+            st.session_state.scan_results = pd.DataFrame(results)
+
+# --- 8. 營收動能策略 (🛠️ 核心修正：分資料夾 + 檔名倒序 + 欄位強取) ---
+elif mode == "營收動能策略":
+    st.sidebar.info("💡 獨立分析 TWSE 與 TPEX 最新 3 個月營收。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         
-        final_list = []
-        # 定義市場資料夾配置
-        market_configs = [
-            ("revenue_data_TWSE", "上市", ".TW"),
-            ("revenue_data_TPEX", "上櫃", ".TWO")
+        final_all_results = []
+        # 配置資料夾與市場資訊
+        configs = [
+            {"folder": "revenue_data_TWSE", "label": "上市", "suffix": ".TW"},
+            {"folder": "revenue_data_TPEX", "label": "上櫃", "suffix": ".TWO"}
         ]
 
-        for folder, m_label, suffix in market_configs:
+        for cfg in configs:
+            folder = cfg["folder"]
             if not os.path.exists(folder):
                 st.error(f"❌ 找不到資料夾: {folder}")
                 continue
             
-            # 檔名倒序排序，抓取最新 3 個 CSV
+            # 1. 檔名倒序抓取 (確保最新月份排在最前面)
             all_files = sorted(glob.glob(os.path.join(folder, "*.csv")), reverse=True)
             
             if len(all_files) < 3:
-                st.warning(f"⚠️ {m_label} 資料不足 3 份，跳過。")
+                st.warning(f"⚠️ {cfg['label']} 資料不足 3 份，略過。")
                 continue
             
             recent_files = all_files[:3]
             month_dfs = []
+            
+            with st.spinner(f"正在分析 {cfg['label']} 最新檔案..."):
+                for f in recent_files:
+                    try:
+                        # 自動嘗試多種編碼
+                        try: t_df = pd.read_csv(f, encoding='utf-8-sig')
+                        except: t_df = pd.read_csv(f, encoding='cp950')
+                        
+                        # 清理標題空白
+                        t_df.columns = [c.strip() for c in t_df.columns]
+                        
+                        # 2. 欄位強取與清洗 (依據要求提取 4 個欄位)
+                        # 注意：部分 CSV 欄位名稱可能有微差，這裡加入彈性匹配
+                        col_map = {
+                            '資料年月': 'Date',
+                            '公司代號': 'ID',
+                            '公司名稱': 'Name',
+                            '營業收入-去年同月增減(%)': 'YoY'
+                        }
+                        
+                        # 檢查欄位是否存在
+                        if all(col in t_df.columns for col in col_map.keys()):
+                            t_df = t_df[list(col_map.keys())].rename(columns=col_map)
+                            t_df['ID'] = t_df['ID'].astype(str).str.strip()
+                            t_df['YoY'] = pd.to_numeric(t_df['YoY'], errors='coerce')
+                            month_dfs.append(t_df.drop_duplicates('ID'))
+                    except Exception as e:
+                        st.error(f"解析 {f} 失敗: {e}")
+                        continue
 
-            for f in recent_files:
-                try:
-                    try: t_df = pd.read_csv(f, encoding='utf-8-sig')
-                    except: t_df = pd.read_csv(f, encoding='cp950')
-                    
-                    t_df.columns = [c.strip() for c in t_df.columns]
-                    
-                    # 強制提取指定 4 個欄位 (或根據 CSV 實際名稱微調)
-                    target_cols = {
-                        '資料年月': 'Date',
-                        '公司代號': 'ID',
-                        '公司名稱': 'Name',
-                        '營業收入-去年同月增減(%)': 'YoY'
-                    }
-                    # 檢查欄位是否存在，不存在則跳過
-                    if all(c in t_df.columns for c in target_cols.keys()):
-                        t_df = t_df[list(target_cols.keys())].rename(columns=target_cols)
-                        t_df['ID'] = t_df['ID'].astype(str).str.strip()
-                        t_df['YoY'] = pd.to_numeric(t_df['YoY'], errors='coerce')
-                        month_dfs.append(t_df.drop_duplicates('ID'))
-                except: continue
-
+            # 3. 合併與計算
             if len(month_dfs) == 3:
-                # 合併三個月資料計算平均
                 m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
+                # 以最新月份 (m1) 為基底進行合併
                 merged = m1.merge(m2[['ID', 'YoY']], on='ID', suffixes=('', '2'))
                 merged = merged.merge(m3[['ID', 'YoY']], on='ID', suffixes=('', '3'))
+                
+                # 計算三月平均年增率
                 merged['avg_growth'] = (merged['YoY'] + merged['YoY2'] + merged['YoY3']) / 3
                 
-                # 篩選平均年增 > 20%
+                # 篩選 > 20%
                 targets = merged[merged['avg_growth'] > 20].copy()
                 
                 for _, row in targets.iterrows():
@@ -190,17 +292,18 @@ if mode == "營收動能策略":
                     p_curr = get_realtime_price(code)
                     if not p_curr: continue
                     
-                    # 取得即時技術面數據
-                    df_h = get_historical_data(f"{code}{suffix}")
+                    # 取得個股基本資料與技術數據
+                    info = stock_info_map.get(code, {"市場": cfg['label'], "產業排位": "-", "族群細分": "-"})
+                    df_h = get_historical_data(f"{code}{cfg['suffix']}")
+                    
                     if not df_h.empty:
                         if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
                         p_yest = float(df_h['Close'].iloc[-1])
                         chg = (p_curr - p_yest) / p_yest
                         vol_amt = (df_h['Volume'].iloc[-1] * p_curr) / 100000000
                         
-                        info = stock_info_map.get(code, {})
-                        final_list.append({
-                            "市場": m_label,
+                        final_all_results.append({
+                            "市場": cfg['label'],
                             "代號": code, "名稱": row['Name'], 
                             "三月均年增%": f"{row['avg_growth']:.1f}%",
                             "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
@@ -209,14 +312,19 @@ if mode == "營收動能策略":
                             "族群細分": info.get("族群細分", "-")
                         })
         
-        if final_list:
-            st.session_state.scan_results = pd.DataFrame(final_list)
+        # 4. 統一呈現結果
+        if final_all_results:
+            st.session_state.scan_results = pd.DataFrame(final_all_results)
         else:
-            st.info("查無符合營收動能之個股。")
+            st.info("⚠️ 掃描完成，但無符合條件（平均年增 > 20%）的個股。")
 
 # --- 9. 顯示結果 ---
 if st.session_state.scan_results is not None:
-    st.markdown("### 📊 掃描結果")
+    st.markdown("### 📊 掃描結果清單")
+    cols = st.session_state.scan_results.columns.tolist()
+    if "市場" in cols:
+        cols.insert(0, cols.pop(cols.index("市場")))
+        st.session_state.scan_results = st.session_state.scan_results[cols]
     st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
 
 if st.sidebar.button("🔐 安全登出"):
