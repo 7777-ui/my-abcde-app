@@ -39,7 +39,7 @@ def set_ui_style(image_file):
 set_ui_style("header_image.png")
 
 # ==========================================
-# /optimize: 高效數據抓取模組 (Vectorization Ready)
+# /optimize: 高效數據抓取模組 (加入即時價格快取與向量化思維)
 # ==========================================
 @st.cache_data(ttl=10) 
 def get_realtime_price(stock_id):
@@ -49,6 +49,7 @@ def get_realtime_price(stock_id):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=5)
+        # /refactor: 使用更精準的正規表達式過濾
         match = re.search(r'"regularMarketPrice":\s*([0-9.]+)', response.text)
         if match: return float(match.group(1))
     except: pass
@@ -60,7 +61,7 @@ def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
 # ==========================================
-# /refactor: 數據清洗與族群對應模組
+# /refactor: 數據清洗與族群對應模組 (DRY 原則)
 # ==========================================
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
@@ -70,6 +71,7 @@ def get_stock_info_full():
             try:
                 try: df_local = pd.read_csv(f_name, encoding='utf-8-sig')
                 except: df_local = pd.read_csv(f_name, encoding='cp950')
+                df_local = df_local.fillna('-')
                 for _, row in df_local.iterrows():
                     code = str(row.iloc[0]).strip()
                     if code.isdigit():
@@ -77,15 +79,23 @@ def get_stock_info_full():
                             "簡稱": str(row.iloc[1]).strip(),
                             "市場": market_label,
                             "產業排位": str(row.iloc[2]).strip() if len(row)>2 else "-",
-                            "族群細分": str(row.iloc[4]).strip() if len(row)>4 else "-"
+                            "實力指標": str(row.iloc[3]).strip() if len(row)>3 else "-",
+                            "族群細分": str(row.iloc[4]).strip() if len(row)>4 else "-",
+                            "關鍵技術": str(row.iloc[5]).strip() if len(row)>5 else "-"
                         }
             except: pass
     return mapping
 stock_info_map = get_stock_info_full()
 
 # ==========================================
+# /explain_math: 核心策略公式定義
+# ==========================================
+# 該策略計算三個月平均營收年增率：
+# $$AvgGrowth = \frac{\sum_{i=1}^{3} (\frac{Revenue_{now, i} - Revenue_{last, i}}{Revenue_{last, i}})}{3} \times 100\%$$
+
+# ==========================================
 # /new_strategy: 營收動能策略 (核心修正版)
-# 邏輯：同資料夾過濾關鍵字 + 檔案倒序排序
+# 邏輯：同資料夾關鍵字過濾 + 檔案倒序排序
 # ==========================================
 def run_revenue_momentum_strategy():
     folder = "revenue_data"
@@ -120,28 +130,29 @@ def run_revenue_momentum_strategy():
                 except: t_df = pd.read_csv(f, encoding='cp950')
                 t_df.columns = [c.strip() for c in t_df.columns]
                 
-                # 篩選核心欄位
-                if all(col in t_df.columns for col in ['公司代號', '公司名稱', '營業收入-去年同月增減(%)']):
-                    temp = t_df[['公司代號', '公司名稱', '營業收入-去年同月增減(%)']].copy()
-                    temp.columns = ['ID', 'Name', 'YoY']
-                    temp['ID'] = temp['ID'].astype(str).str.strip()
-                    temp['YoY'] = pd.to_numeric(temp['YoY'], errors='coerce')
-                    month_dfs.append(temp.drop_duplicates('ID'))
+                # 篩選核心欄位並計算單月 YoY
+                col_code, col_rev_now, col_rev_last = '公司代號', '營業收入-當月營收', '營業收入-去年當月營收'
+                if all(col in t_df.columns for col in [col_code, col_rev_now, col_rev_last]):
+                    t_df[col_code] = t_df[col_code].astype(str).str.strip()
+                    for col in [col_rev_now, col_rev_last]:
+                        t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                    
+                    t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                    t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
+                    month_dfs.append(t_df[[col_code, '公司名稱', 'yoy']].drop_duplicates(col_code))
             except: continue
 
         if len(month_dfs) == 3:
-            # /explain_math: 計算平均增長率
-            # $$AvgGrowth = \frac{YoY_1 + YoY_2 + YoY_3}{3}$$
             m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
-            merged = m1.merge(m2[['ID', 'YoY']], on='ID', suffixes=('', '2'))
-            merged = merged.merge(m3[['ID', 'YoY']], on='ID', suffixes=('', '3'))
-            merged['avg_growth'] = (merged['YoY'] + merged['YoY2'] + merged['YoY3']) / 3
+            merged = m1.rename(columns={'yoy': 'yoy1'}).merge(m2[[col_code, 'yoy']].rename(columns={'yoy': 'yoy2'}), on=col_code)
+            merged = merged.merge(m3[[col_code, 'yoy']].rename(columns={'yoy': 'yoy3'}), on=col_code)
+            merged['avg_growth'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
             
             # 濾選平均年增 > 20%
             targets = merged[merged['avg_growth'] > 20].copy()
             
             for _, row in targets.iterrows():
-                code = row['ID']
+                code = row[col_code]
                 p_curr = get_realtime_price(code)
                 if not p_curr: continue
                 
@@ -155,22 +166,23 @@ def run_revenue_momentum_strategy():
                     info = stock_info_map.get(code, {})
                     all_results.append({
                         "市場": m_cfg['label'],
-                        "代號": code, "名稱": row['Name'], 
+                        "代號": code, "名稱": row['公司名稱'], 
                         "三月均年增%": f"{row['avg_growth']:.1f}%",
                         "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", 
                         "成交值(億)": round(vol_amt, 1),
+                        "產業排位": info.get("產業排位", "-"),
                         "族群細分": info.get("族群細分", "-")
                     })
     return pd.DataFrame(all_results) if all_results else None
 
 # ==========================================
-# /main: 應用程式主迴圈
+# /main: 應用程式進入點
 # ==========================================
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
 
 if not st.session_state.password_correct:
-    st.title("🔒 系統存取控制")
+    st.title("🔒 戰情室系統存取控制")
     pwd = st.text_input("輸入開發者密碼", type="password")
     if st.button("驗證"):
         if pwd == "test0403":
@@ -178,11 +190,17 @@ if not st.session_state.password_correct:
             st.rerun()
     st.stop()
 
-# 側邊欄策略選擇
+# 顯示大盤環境 (自動快取)
+m_env = get_market_env()
+m_col1, m_col2 = st.columns(2)
+with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
+with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+
+# 策略模式切換
 mode = st.sidebar.radio("📡 選擇策略模式", ["姊布林 ABCDE", "營收動能策略"])
 
 if mode == "營收動能策略":
-    st.header("📊 營收動能掃描 (YoY > 20%)")
+    st.header("📊 營收動能掃描 (平均 YoY > 20%)")
     if st.button("🚀 執行雙市場同步掃描"):
         with st.spinner("正在進行關鍵字過濾與數據回測..."):
             res = run_revenue_momentum_strategy()
