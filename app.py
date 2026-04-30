@@ -217,59 +217,56 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 修正: 讀取 TWSE / TPEX 資料夾與檔名倒序) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 修正：雙路徑讀取與檔名倒序) ---
 elif mode == "營收動能策略":
     st.sidebar.info("💡 偵測 `revenue_data_TWSE` 與 `revenue_data_TPEX` 最新三月資料並計算平均【年增率】。")
     if st.sidebar.button("📊 啟動營收動能分析"):
-        # 設定來源資料夾
         folders = ["revenue_data_TWSE", "revenue_data_TPEX"]
-        month_dfs = [] # 用來存放三個月份合併後的 DataFrame
         
-        # 1. 抓取所有資料夾中的檔案並按檔名倒序排列 (假設檔名為日期如 2026_03.csv)
-        all_files = []
+        # 1. 抓取兩個資料夾中所有的 CSV 檔案名稱
+        all_csv_filenames = []
         for fld in folders:
             if os.path.exists(fld):
-                all_files.extend(glob.glob(os.path.join(fld, "*.csv")))
+                files = [os.path.basename(f) for f in glob.glob(os.path.join(fld, "*.csv"))]
+                all_csv_filenames.extend(files)
         
-        # 依據檔案名稱倒序排列 (取最新月份)
-        all_files.sort(key=lambda x: os.path.basename(x), reverse=True)
-        
-        # 邏輯：我們需要最近的三個月份，每個月份可能分散在兩個資料夾中 (上市/上櫃)
-        # 這裡簡化邏輯：直接抓取檔名不重複的前三個月份標籤
-        unique_months = sorted(list(set([os.path.basename(f) for f in all_files])), reverse=True)[:3]
+        # 2. 取得不重複的檔名並倒序排列，取出前三個月份標籤 (例如：['2026_03.csv', '2026_02.csv', '2026_01.csv'])
+        unique_months = sorted(list(set(all_csv_filenames)), reverse=True)[:3]
         
         if len(unique_months) < 3:
-            st.warning(f"⚠️ 資料檔案不足，目前僅偵測到 {len(unique_months)} 個月份。")
+            st.warning(f"⚠️ 資料夾內檔案不足 3 月份。目前偵測到：{unique_months}")
         else:
-            with st.spinner(f"正在分析月份: {unique_months}"):
+            month_dfs = [] # 儲存這三個月，每個月合併上市櫃後的結果
+            
+            with st.spinner(f"正在分析月份標籤: {unique_months}"):
                 for target_m in unique_months:
-                    m_parts = []
-                    # 找出這月份在兩個資料夾中對應的檔案
-                    target_files = [f for f in all_files if os.path.basename(f) == target_m]
-                    for f in target_files:
-                        try:
-                            try: t_df = pd.read_csv(f, encoding='utf-8-sig')
-                            except: t_df = pd.read_csv(f, encoding='cp950')
-                            
-                            t_df.columns = [c.strip() for c in t_df.columns]
-                            col_code = '公司代號'
-                            col_name = '公司名稱'
-                            col_rev_now = '營業收入-當月營收'
-                            col_rev_last = '營業收入-去年當月營收'
-                            
-                            if all(col in t_df.columns for col in [col_code, col_rev_now, col_rev_last]):
-                                t_df[col_code] = t_df[col_code].astype(str).str.strip()
-                                for col in [col_rev_now, col_rev_last]:
-                                    t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
-                                t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
-                                t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
-                                m_parts.append(t_df[[col_code, col_name, 'yoy']])
-                        except: continue
+                    current_month_parts = []
+                    for fld in folders:
+                        file_path = os.path.join(fld, target_m)
+                        if os.path.exists(file_path):
+                            try:
+                                try: t_df = pd.read_csv(file_path, encoding='utf-8-sig')
+                                except: t_df = pd.read_csv(file_path, encoding='cp950')
+                                
+                                t_df.columns = [c.strip() for c in t_df.columns]
+                                col_code, col_name = '公司代號', '公司名稱'
+                                col_rev_now, col_rev_last = '營業收入-當月營收', '營業收入-去年當月營收'
+                                
+                                if all(col in t_df.columns for col in [col_code, col_rev_now, col_rev_last]):
+                                    t_df[col_code] = t_df[col_code].astype(str).str.strip()
+                                    for col in [col_rev_now, col_rev_last]:
+                                        t_df[col] = pd.to_numeric(t_df[col].astype(str).str.replace(',', ''), errors='coerce')
+                                    t_df = t_df.dropna(subset=[col_code, col_rev_now, col_rev_last])
+                                    # 計算該月該股 YoY
+                                    t_df['yoy'] = (t_df[col_rev_now] - t_df[col_rev_last]) / t_df[col_rev_last]
+                                    current_month_parts.append(t_df[[col_code, col_name, 'yoy']])
+                            except: continue
                     
-                    if m_parts:
-                        # 將同月份的上市與上櫃資料合併
-                        month_dfs.append(pd.concat(m_parts).drop_duplicates('公司代號'))
+                    if current_month_parts:
+                        # 將該月份的上市與上櫃資料合併，並去除重複代號
+                        month_dfs.append(pd.concat(current_month_parts).drop_duplicates('公司代號'))
 
+                # 確保真的拿到了三個月份的資料進行橫向合併
                 if len(month_dfs) == 3:
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
                     
