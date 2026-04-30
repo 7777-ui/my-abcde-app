@@ -17,7 +17,7 @@ def get_realtime_price(stock_id):
     elif stock_id == 'TSE': target = '%5ETWII'
     else: target = stock_id
     url = f"https://tw.stock.yahoo.com/quote/{target}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=5)
         patterns = [r'"regularMarketPrice":\s*([0-9.]+)', r'"price":\s*"([0-9,.]+)"']
@@ -132,7 +132,7 @@ st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %
 
 # --- 6. 側邊欄設定 ---
 st.sidebar.title("🛠️ 策略切換")
-mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營收動能策略"])
+mode = st.sidebar.radio("請選擇掃描模式：", ["姊布林 ABCDE", "營營收動能策略"])
 
 # --- 7. 姊布林 ABCDE 策略邏輯 ---
 if mode == "姊布林 ABCDE":
@@ -163,9 +163,11 @@ if mode == "姊布林 ABCDE":
                     if df.index[-1].date() >= today_date:
                         p_yest = float(df['Close'].iloc[-2])
                         history_for_ma = df['Close'].iloc[-20:-1].tolist()
+                        last_vol = df['Volume'].iloc[-1]
                     else:
                         p_yest = float(df['Close'].iloc[-1])
                         history_for_ma = df['Close'].iloc[-19:].tolist()
+                        last_vol = df['Volume'].iloc[-1]
                     
                     close_20 = history_for_ma + [p_curr]
                     m20_now = sum(close_20) / 20
@@ -173,7 +175,7 @@ if mode == "姊布林 ABCDE":
                     upper_now = m20_now + (std_now * 2)
                     bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
                     chg = (p_curr - p_yest) / p_yest
-                    vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
+                    vol_amt = (last_vol * p_curr) / 100000000 
                     ratio = bw / current_env['帶寬'] if current_env['帶寬'] > 0 else 0
                     slope_pos = m20_now > sum(history_for_ma) / 20
                     break_upper = p_curr > upper_now
@@ -217,9 +219,9 @@ if mode == "姊布林 ABCDE":
         if results:
             st.session_state.scan_results = pd.DataFrame(results)
 
-# --- 8. 營收動能策略邏輯 (🛠️ 已修改為：近三月平均年增率 > 20%) ---
+# --- 8. 營收動能策略邏輯 (🛠️ 已優化：近三月算術平均年增率) ---
 elif mode == "營收動能策略":
-    st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料並計算「算術平均年增率」。")
+    st.sidebar.info("💡 偵測 `revenue_data/` 最新三月資料並計算「平均年增率 > 20%」。")
     if st.sidebar.button("📊 啟動營收動能分析"):
         folder = "revenue_data"
         all_files = glob.glob(os.path.join(folder, "*.csv"))
@@ -238,7 +240,7 @@ elif mode == "營收動能策略":
                         except: t_df = pd.read_csv(f, encoding='cp950')
                         t_df.columns = [c.strip() for c in t_df.columns]
                         
-                        # 關鍵欄位：當月營收、去年當月營收
+                        # 關鍵欄位對接：當月營收、去年當月營收
                         cur_col = '營業收入-當月營收'
                         last_col = '營業收入-去年當月營收'
                         
@@ -248,7 +250,7 @@ elif mode == "營收動能策略":
                             t_df[last_col] = pd.to_numeric(t_df[last_col].astype(str).str.replace(',', ''), errors='coerce')
                             t_df = t_df.dropna(subset=['公司代號', cur_col, last_col])
                             
-                            # 計算單月 YoY
+                            # 計算單月 YoY (年增率)
                             t_df['yoy'] = (t_df[cur_col] - t_df[last_col]) / t_df[last_col].abs()
                             month_dfs.append(t_df[['公司代號', '公司名稱', 'yoy']])
                     except: continue
@@ -257,11 +259,12 @@ elif mode == "營收動能策略":
                     m1, m2, m3 = month_dfs[0], month_dfs[1], month_dfs[2]
                     m1, m2, m3 = m1.drop_duplicates('公司代號'), m2.drop_duplicates('公司代號'), m3.drop_duplicates('公司代號')
                     
+                    # 進行資料串接
                     merged = m1.rename(columns={'yoy': 'yoy1'})
                     merged = merged.merge(m2[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy2'}), on='公司代號')
                     merged = merged.merge(m3[['公司代號', 'yoy']].rename(columns={'yoy': 'yoy3'}), on='公司代號')
                     
-                    # 計算近三月算術平均年增率
+                    # 算術平均年增率
                     merged['avg_yoy'] = (merged['yoy1'] + merged['yoy2'] + merged['yoy3']) / 3 * 100
                     targets = merged[merged['avg_yoy'] > 20].copy()
                     
