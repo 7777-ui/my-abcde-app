@@ -79,7 +79,7 @@ if not st.session_state.password_correct:
         else: st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 ---
+# --- 3. 🛡️ 族群 CSV 讀取 (供兩個策略對齊產業資訊) ---
 @st.cache_data(ttl=604800)
 def get_stock_info_full():
     mapping = {}
@@ -134,7 +134,7 @@ st.sidebar.markdown("---")
 strategy_mode = st.sidebar.radio("📡 模式切換", ["姊布林策略", "營收動能策略"])
 
 # ===================================================================================================
-# --- 【姊布林策略區塊】 ---
+# --- 【區塊一：姊布林策略區塊】 ---
 # ===================================================================================================
 if strategy_mode == "姊布林策略":
     st.markdown("### 🏹 姊布林 ABCDE 策略戰情室")
@@ -201,7 +201,7 @@ if strategy_mode == "姊布林策略":
         st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
 
 # ===================================================================================================
-# --- 【營收動能策略區塊】 ---
+# --- 【區塊二：營收動能策略區塊】 ---
 # ===================================================================================================
 elif strategy_mode == "營收動能策略":
     st.markdown("### 📊 月營收動能掃描戰情室")
@@ -213,25 +213,28 @@ elif strategy_mode == "營收動能策略":
             return
         
         all_files = os.listdir(folder)
+        
         def process_market(prefix):
+            # 取得該市場最新 3 個月 CSV
             m_files = sorted([f for f in all_files if f.startswith(prefix)], reverse=True)[:3]
             if not m_files: return pd.DataFrame()
             
-            combined = []
+            combined_dfs = []
             for f in m_files:
                 try:
+                    # 7-1. 強制提取 4 欄位並清洗
                     df_r = pd.read_csv(os.path.join(folder, f), encoding='utf-8-sig')
                     df_r.columns = [c.strip() for c in df_r.columns]
-                    # 7-1. 僅保留核心 4 欄位
                     target_cols = ['資料年月', '公司代號', '公司名稱', '營業收入-去年同月增減(%)']
                     df_r = df_r[target_cols].copy()
                     df_r['公司代號'] = df_r['公司代號'].astype(str).str.strip()
-                    combined.append(df_r)
+                    combined_dfs.append(df_r)
                 except: continue
             
-            if not combined: return pd.DataFrame()
-            # 2-1. 合併後計算平均年增
-            df_all = pd.concat(combined)
+            if not combined_dfs: return pd.DataFrame()
+            
+            # 2-1. 合併並計算三個月平均 (加總/3)
+            df_all = pd.concat(combined_dfs)
             df_avg = df_all.groupby(['公司代號', '公司名稱'])['營業收入-去年同月增減(%)'].mean().reset_index()
             df_avg.columns = ['代號', '名稱', '平均年增%']
             return df_avg[df_avg['平均年增%'] > 20]
@@ -243,41 +246,42 @@ elif strategy_mode == "營收動能策略":
             df_tpex['市場別'] = '上櫃'
             
             final_list = pd.concat([df_twse, df_tpex], ignore_index=True)
-            if final_list.empty:
-                st.warning("查無平均年增 > 20% 個股")
-                return
-
+            
             rev_results = []
             for _, row in final_list.iterrows():
                 code = row['代號']
-                # 7-2. 即時價格 (複用來源)
+                # 7-2. 即時價格 (重複寫入以保證獨立性)
                 p_now = get_realtime_price(code)
                 if not p_now: continue
                 
-                # 修正：增加數據長度檢查，防 IndexError
+                # 抓取漲幅與成交值
                 df_h = get_historical_data(f"{code}.TW" if row['市場別'] == '上市' else f"{code}.TWO")
-                chg_s = "0.0%"; vol_b = 0.0
-                if not df_h.empty and len(df_h) >= 2:
-                    p_old = float(df_h['Close'].iloc[-2])
-                    chg_s = f"{((p_now - p_old)/p_old)*100:.2f}%"
-                    vol_b = (df_h['Volume'].iloc[-1] * p_now) / 100000000
-                elif not df_h.empty and len(df_h) == 1:
-                    vol_b = (df_h['Volume'].iloc[-1] * p_now) / 100000000
+                chg_str = "0.0%"; vol_bn = 0.0
+                if not df_h.empty:
+                    p_y = float(df_h['Close'].iloc[-1])
+                    chg_str = f"{((p_now - p_y)/p_y)*100:.2f}%"
+                    vol_bn = (df_h['Volume'].iloc[-1] * p_now) / 100000000
 
-                # 7-3. 產業/族群對齊
-                extra = stock_info_map.get(code, {"產業排位": "-", "族群細分": "-"})
+                # 7-3. 對齊產業與族群
+                extra_info = stock_info_map.get(code, {"產業排位": "-", "族群細分": "-"})
                 
                 rev_results.append({
-                    "市場別": row['市場別'], "代號": code, "名稱": row['名稱'],
+                    "市場別": row['市場別'],
+                    "代號": code,
+                    "名稱": row['名稱'],
                     "近三月平均年增%": round(row['平均年增%'], 2),
-                    "現價": p_now, "漲幅%": chg_s, "成交值(億)": round(vol_b, 2),
-                    "產業排位": extra["產業排位"], "族群細分": extra["族群細分"]
+                    "現價": p_now,
+                    "漲幅%": chg_str,
+                    "成交值(億)": round(vol_bn, 2),
+                    "產業排位": extra_info["產業排位"],
+                    "族群細分": extra_info["族群細分"]
                 })
             
             if rev_results:
-                # 4. 顯示具備篩選排序功能的 DataFrame
-                st.dataframe(pd.DataFrame(rev_results).sort_values("近三月平均年增%", ascending=False), 
-                             use_container_width=True, hide_index=True)
+                # 4. 顯示表格 (Streamlit 預設標題可點擊排序)
+                st.dataframe(pd.DataFrame(rev_results), use_container_width=True, hide_index=True)
+            else:
+                st.warning("查無符合營收動能個股")
 
     if st.button("🔍 執行營收動能掃描"):
         run_revenue_momentum()
