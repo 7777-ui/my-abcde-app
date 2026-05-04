@@ -135,7 +135,7 @@ m_env = get_market_env()
 def get_twse_revenue_data_cleaned():
     """
     從 revenue_data 資料夾讀取最新 3 個月的 TWSE CSV 檔案
-    清洗欄位保留：資料年月、公司代號、公司名稱、去年同月增減(%)
+    清洗欄位保留：資料年月、公司代號、公司名稱、營業收入-去年同月營收增減(%)
     回傳：清洗後的 TWSE DataFrame
     """
     revenue_data = []
@@ -155,17 +155,15 @@ def get_twse_revenue_data_cleaned():
             except:
                 df = pd.read_csv(file_path, encoding='cp950')
             
-            # 欄位清洗：只保留必要欄位
-            required_cols = ['資料年月', '公司代號', '公司名稱', '去年同月增減(%)']
-            
-            # 嘗試匹配欄位（處理可能的空格或變體）
+            # 清洗欄位名稱（移除前後空格）
             df.columns = df.columns.str.strip()
-            available_cols = [col for col in required_cols if col in df.columns]
             
-            if len(available_cols) == 4:
+            # 檢查必要欄位是否存在
+            required_cols = ['資料年月', '公司代號', '公司名稱', '營業收入-去年同月營收增減(%)']
+            if all(col in df.columns for col in required_cols):
                 df_clean = df[required_cols].copy()
                 df_clean = df_clean.fillna(0)
-                df_clean['去年同月增減(%)'] = pd.to_numeric(df_clean['去年同月增減(%)'], errors='coerce').fillna(0)
+                df_clean['營業收入-去年同月營收增減(%)'] = pd.to_numeric(df_clean['營業收入-去年同月營收增減(%)'], errors='coerce').fillna(0)
                 revenue_data.append(df_clean)
         except Exception as e:
             pass
@@ -181,7 +179,7 @@ def get_twse_revenue_data_cleaned():
 def get_tpex_revenue_data_cleaned():
     """
     從 revenue_data 資料夾讀取最新 3 個月的 TPEX CSV 檔案
-    清洗欄位保留：資料年月、公司代號、公司名稱、去年同月增減(%)
+    清洗欄位保留：資料年月、公司代號、公司名稱、營業收入-去年同月營收增減(%)
     回傳：清洗後的 TPEX DataFrame
     """
     revenue_data = []
@@ -201,17 +199,15 @@ def get_tpex_revenue_data_cleaned():
             except:
                 df = pd.read_csv(file_path, encoding='cp950')
             
-            # 欄位清洗：只保留必要欄位
-            required_cols = ['資料年月', '公司代號', '公司名稱', '去年同月增減(%)']
-            
-            # 嘗試匹配欄位（處理可能的空格或變體）
+            # 清洗欄位名稱（移除前後空格）
             df.columns = df.columns.str.strip()
-            available_cols = [col for col in required_cols if col in df.columns]
             
-            if len(available_cols) == 4:
+            # 檢查必要欄位是否存在
+            required_cols = ['資料年月', '公司代號', '公司名稱', '營業收入-去年同月營收增減(%)']
+            if all(col in df.columns for col in required_cols):
                 df_clean = df[required_cols].copy()
                 df_clean = df_clean.fillna(0)
-                df_clean['去年同月增減(%)'] = pd.to_numeric(df_clean['去年同月增減(%)'], errors='coerce').fillna(0)
+                df_clean['營業收入-去年同月營收增減(%)'] = pd.to_numeric(df_clean['營業收入-去年同月營收增減(%)'], errors='coerce').fillna(0)
                 revenue_data.append(df_clean)
         except Exception as e:
             pass
@@ -238,7 +234,7 @@ def filter_twse_revenue_momentum():
     
     # 計算每個股票的平均年增率
     df_agg = df_twse.groupby(['公司代號', '公司名稱']).agg({
-        '去年同月增減(%)': 'mean'
+        '營業收入-去年同月營收增減(%)': 'mean'
     }).reset_index()
     
     df_agg.columns = ['代號', '名稱', '近三月平均年增%']
@@ -264,7 +260,7 @@ def filter_tpex_revenue_momentum():
     
     # 計算每個股票的平均年增率
     df_agg = df_tpex.groupby(['公司代號', '公司名稱']).agg({
-        '去年同月增減(%)': 'mean'
+        '營業收入-去年同月營收增減(%)': 'mean'
     }).reset_index()
     
     df_agg.columns = ['代號', '名稱', '近三月平均年增%']
@@ -518,7 +514,12 @@ elif strategy_mode == "💰 營收動能策略":
         )
     elif st.session_state.revenue_results is not None and st.session_state.revenue_results.empty:
         st.warning("⚠️ 未發現符合條件的營收動能個股 (近三月平均年增% > 20%)")
-        st.info("💡 檢查項目：\n- revenue_data 資料夾中是否有 TWSE_202603... 與 TPEX_202603... 的 CSV 檔\n- CSV 欄位是否包含：資料年月、公司代號、公司名稱、去年同月增減(%)")
+        st.info("""
+        💡 **檢查項目：**
+        - revenue_data 資料夾中是否有 TWSE_202603.csv 等檔案
+        - CSV 是否包含必要欄位：`資料年月`, `公司代號`, `公司名稱`, `營業收入-去年同月營收增減(%)`
+        - 資料中是否有個股的近三月平均年增率 > 20%
+        """)
     else:
         st.info("💡 點擊左側 '開始掃描營收動能' 按鈕以獲取結果")
 
