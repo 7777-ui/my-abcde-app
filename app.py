@@ -130,26 +130,24 @@ m_env = get_market_env()
 # 【區塊 A：營收動能策略 - 獨立區塊開始】
 # ============================================================================
 
-# --- A-1. 營收資料讀取與清洗函數 ---
+# --- A-1. TWSE 營收資料讀取與清洗函數 ---
 @st.cache_data(ttl=3600)
-def get_revenue_data_cleaned():
+def get_twse_revenue_data_cleaned():
     """
-    從 revenue_data 資料夾讀取最新 3 個月的上市與上櫃 CSV 檔案
+    從 revenue_data 資料夾讀取最新 3 個月的 TWSE CSV 檔案
     清洗欄位保留：資料年月、公司代號、公司名稱、去年同月增減(%)
+    回傳：清洗後的 TWSE DataFrame
     """
     revenue_data = []
     
     if not os.path.exists("revenue_data"):
         return pd.DataFrame()
     
-    # 取得 revenue_data 資料夾中所有檔案
+    # 取得 revenue_data 資料夾中所有 TWSE 檔案（最新 3 個月）
     files = os.listdir("revenue_data")
     twse_files = sorted([f for f in files if f.startswith("TWSE_") and f.endswith(".csv")], reverse=True)[:3]
-    tpex_files = sorted([f for f in files if f.startswith("TPEX_") and f.endswith(".csv")], reverse=True)[:3]
     
-    all_files = twse_files + tpex_files
-    
-    for file_name in all_files:
+    for file_name in twse_files:
         file_path = os.path.join("revenue_data", file_name)
         try:
             try:
@@ -158,7 +156,6 @@ def get_revenue_data_cleaned():
                 df = pd.read_csv(file_path, encoding='cp950')
             
             # 欄位清洗：只保留必要欄位
-            # 預期欄位名稱：資料年月、公司代號、公司名稱、去年同月增減(%)
             required_cols = ['資料年月', '公司代號', '公司名稱', '去年同月增減(%)']
             
             # 嘗試匹配欄位（處理可能的空格或變體）
@@ -179,19 +176,68 @@ def get_revenue_data_cleaned():
     else:
         return pd.DataFrame()
 
-# --- A-2. 營收動能篩選函數 ---
-def filter_revenue_momentum():
+# --- A-2. TPEX 營收資料讀取與清洗函數 ---
+@st.cache_data(ttl=3600)
+def get_tpex_revenue_data_cleaned():
     """
-    計算近三月平均年增率 > 20% 的個股
-    回傳：代號、名稱、近三月平均年增%
+    從 revenue_data 資料夾讀取最新 3 個月的 TPEX CSV 檔案
+    清洗欄位保留：資料年月、公司代號、公司名稱、去年同月增減(%)
+    回傳：清洗後的 TPEX DataFrame
     """
-    df_revenue = get_revenue_data_cleaned()
+    revenue_data = []
     
-    if df_revenue.empty:
+    if not os.path.exists("revenue_data"):
+        return pd.DataFrame()
+    
+    # 取得 revenue_data 資料夾中所有 TPEX 檔案（最新 3 個月）
+    files = os.listdir("revenue_data")
+    tpex_files = sorted([f for f in files if f.startswith("TPEX_") and f.endswith(".csv")], reverse=True)[:3]
+    
+    for file_name in tpex_files:
+        file_path = os.path.join("revenue_data", file_name)
+        try:
+            try:
+                df = pd.read_csv(file_path, encoding='utf-8-sig')
+            except:
+                df = pd.read_csv(file_path, encoding='cp950')
+            
+            # 欄位清洗：只保留必要欄位
+            required_cols = ['資料年月', '公司代號', '公司名稱', '去年同月增減(%)']
+            
+            # 嘗試匹配欄位（處理可能的空格或變體）
+            df.columns = df.columns.str.strip()
+            available_cols = [col for col in required_cols if col in df.columns]
+            
+            if len(available_cols) == 4:
+                df_clean = df[required_cols].copy()
+                df_clean = df_clean.fillna(0)
+                df_clean['去年同月增減(%)'] = pd.to_numeric(df_clean['去年同月增減(%)'], errors='coerce').fillna(0)
+                revenue_data.append(df_clean)
+        except Exception as e:
+            pass
+    
+    if revenue_data:
+        df_combined = pd.concat(revenue_data, ignore_index=True)
+        return df_combined
+    else:
+        return pd.DataFrame()
+
+# --- A-3. 篩選 TWSE 營收動能函數 ---
+def filter_twse_revenue_momentum():
+    """
+    【步驟 1】TWSE 獨立計算：
+    - 合併 TWSE 近 3 個月資料
+    - 計算每個股票的平均年增率
+    - 篩選近三月平均年增率 > 20% 的個股
+    回傳：代號、名稱、近三月平均年增%（TWSE 專用）
+    """
+    df_twse = get_twse_revenue_data_cleaned()
+    
+    if df_twse.empty:
         return pd.DataFrame()
     
     # 計算每個股票的平均年增率
-    df_agg = df_revenue.groupby(['公司代號', '公司名稱']).agg({
+    df_agg = df_twse.groupby(['公司代號', '公司名稱']).agg({
         '去年同月增減(%)': 'mean'
     }).reset_index()
     
@@ -202,47 +248,54 @@ def filter_revenue_momentum():
     
     return df_filtered
 
-# --- A-3. 營收動能市場別判定函數 ---
-def determine_market_type_revenue(code):
-    """根據股票代號判定屬於上市(TWSE)或上櫃(TPEX)"""
-    df_revenue = get_revenue_data_cleaned()
-    if df_revenue.empty:
-        return None
+# --- A-4. 篩選 TPEX 營收動能函數 ---
+def filter_tpex_revenue_momentum():
+    """
+    【步驟 2】TPEX 獨立計算：
+    - 合併 TPEX 近 3 個月資料
+    - 計算每個股票的平均年增率
+    - 篩選近三月平均年增率 > 20% 的個股
+    回傳：代號、名稱、近三月平均年增%（TPEX 專用）
+    """
+    df_tpex = get_tpex_revenue_data_cleaned()
     
-    market_match = df_revenue[df_revenue['公司代號'] == code]
-    if not market_match.empty:
-        file_name = market_match.iloc[0].get('來源檔案', '')
-        if 'TWSE' in file_name or market_match.iloc[0].get('市場', '') == '上市':
-            return '上市'
-        elif 'TPEX' in file_name or market_match.iloc[0].get('市場', '') == '上櫃':
-            return '上櫃'
+    if df_tpex.empty:
+        return pd.DataFrame()
     
-    # 如果無法從 revenue_data 判定，則嘗試從 stock_info_map 判定
-    # 根據代號判定：一般上市是 4-5 碼，上櫃也是
-    # 這裡使用簡單規則，可根據實際需求調整
-    try:
-        test_twse = yf.download(f"{code}.TW", period="1d", progress=False)
-        if not test_twse.empty:
-            return '上市'
-    except:
-        pass
+    # 計算每個股票的平均年增率
+    df_agg = df_tpex.groupby(['公司代號', '公司名稱']).agg({
+        '去年同月增減(%)': 'mean'
+    }).reset_index()
     
-    try:
-        test_tpex = yf.download(f"{code}.TWO", period="1d", progress=False)
-        if not test_tpex.empty:
-            return '上櫃'
-    except:
-        pass
+    df_agg.columns = ['代號', '名稱', '近三月平均年增%']
     
-    return None
+    # 篩選近三月平均年增率 > 20%
+    df_filtered = df_agg[df_agg['近三月平均年增%'] > 20].copy()
+    
+    return df_filtered
 
-# --- A-4. 營收動能結果組合函數 ---
+# --- A-5. 營收動能結果組合函數 ---
 def build_revenue_momentum_results():
     """
-    組合營收動能策略結果表
-    欄位：市場別、代號、名稱、近三月平均年增%、現價、漲幅%、成交值(億)、產業排位、族群細分
+    【步驟 3】合併結果：
+    - 取得 TWSE 篩選結果
+    - 取得 TPEX 篩選結果
+    - 合併兩者
+    - 為每一個個股補充：現價、漲幅%、成交值(億)、產業排位、族群細分
+    回傳：完整結果表 (市場別、代號、名稱、近三月平均年增%、現價、漲幅%、成交值(億)、產業排位、族群細分)
     """
-    df_momentum = filter_revenue_momentum()
+    # 步驟 1: TWSE 獨立篩選
+    df_twse_filtered = filter_twse_revenue_momentum()
+    if not df_twse_filtered.empty:
+        df_twse_filtered.insert(0, '市場別', '上市')
+    
+    # 步驟 2: TPEX 獨立篩選
+    df_tpex_filtered = filter_tpex_revenue_momentum()
+    if not df_tpex_filtered.empty:
+        df_tpex_filtered.insert(0, '市場別', '上櫃')
+    
+    # 步驟 3: 合併 TWSE + TPEX 結果
+    df_momentum = pd.concat([df_twse_filtered, df_tpex_filtered], ignore_index=True)
     
     if df_momentum.empty:
         return pd.DataFrame()
@@ -251,30 +304,22 @@ def build_revenue_momentum_results():
     
     with st.spinner("分析營收動能中..."):
         for _, row in df_momentum.iterrows():
+            market = row['市場別']
             code = row['代號']
             name = row['名稱']
             avg_revenue_growth = row['近三月平均年增%']
             
-            # --- A-4-1. 營收動能區塊：獲取即時價格 ---
+            # --- A-5-1. 營收動能區塊：獲取即時價格 ---
             p_curr = get_realtime_price(code)
             if not p_curr:
                 continue
             
-            # --- A-4-2. 營收動能區塊：獲取歷史數據計算漲幅% 與 成交值(億) ---
-            market_type = determine_market_type_revenue(code)
-            
+            # --- A-5-2. 營收動能區塊：獲取歷史數據計算漲幅% 與 成交值(億) ---
             df_hist = None
-            if market_type == '上市':
+            if market == '上市':
                 df_hist = get_historical_data(f"{code}.TW")
-            elif market_type == '上櫃':
+            elif market == '上櫃':
                 df_hist = get_historical_data(f"{code}.TWO")
-            else:
-                try:
-                    df_hist = get_historical_data(f"{code}.TW")
-                    if df_hist.empty or len(df_hist) < 5:
-                        df_hist = get_historical_data(f"{code}.TWO")
-                except:
-                    pass
             
             if df_hist is None or df_hist.empty or len(df_hist) < 2:
                 continue
@@ -302,7 +347,7 @@ def build_revenue_momentum_results():
             else:
                 vol_amt = 0
             
-            # --- A-4-3. 營收動能區塊：取得產業排位與族群細分 ---
+            # --- A-5-3. 營收動能區塊：取得產業排位與族群細分 ---
             industry_rank = "-"
             industry_group = "-"
             
@@ -312,7 +357,7 @@ def build_revenue_momentum_results():
                 industry_group = info.get("族群細分", "-")
             
             results.append({
-                "市場別": market_type if market_type else "未知",
+                "市場別": market,
                 "代號": code,
                 "名稱": name,
                 "近三月平均年增%": f"{avg_revenue_growth:.2f}%",
@@ -458,6 +503,13 @@ elif strategy_mode == "💰 營收動能策略":
 
     # --- 7. 顯示營收動能結果 ---
     st.markdown("#### 💰 營收動能策略結果")
+    st.markdown("""
+    **計算邏輯：**
+    1️⃣ TWSE 近 3 個月資料合併 → 計算平均年增率 > 20% 
+    2️⃣ TPEX 近 3 個月資料合併 → 計算平均年增率 > 20%
+    3️⃣ 合併上述結果，補充現價、漲幅、成交值、產業資訊
+    """)
+    
     if st.session_state.revenue_results is not None and not st.session_state.revenue_results.empty:
         st.dataframe(
             st.session_state.revenue_results,
@@ -466,6 +518,7 @@ elif strategy_mode == "💰 營收動能策略":
         )
     elif st.session_state.revenue_results is not None and st.session_state.revenue_results.empty:
         st.warning("⚠️ 未發現符合條件的營收動能個股 (近三月平均年增% > 20%)")
+        st.info("💡 檢查項目：\n- revenue_data 資料夾中是否有 TWSE_202603... 與 TPEX_202603... 的 CSV 檔\n- CSV 欄位是否包含：資料年月、公司代號、公司名稱、去年同月增減(%)")
     else:
         st.info("💡 點擊左側 '開始掃描營收動能' 按鈕以獲取結果")
 
