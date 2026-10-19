@@ -89,7 +89,7 @@ def init_replay_state():
 
 @st.cache_data
 def load_replay_data(stock_code):
-    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並確保包含多日完整 09:00-13:30 數據 """
+    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並確保完整涵蓋 09:00-13:30 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
         if df.empty or len(df) < 10:
@@ -99,16 +99,14 @@ def load_replay_data(stock_code):
         df = df.reset_index()
         time_col = "Datetime" if "Datetime" in df.columns else ("Date" if "Date" in df.columns else df.columns[0])
         df = df.rename(columns={time_col: "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
-        df["Time_dt"] = pd.to_datetime(df["Time"])
-        # 轉換為台北時間格式避免時區偏移
-        df["Time_dt"] = df["Time_dt"].dt.tz_localize(None)
+        df["Time_dt"] = pd.to_datetime(df["Time"]).dt.tz_localize(None)
         df["Date"] = df["Time_dt"].dt.strftime("%Y-%m-%d")
         df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M")
         return df[['Time_dt', 'Date', 'Time_Str', 'Open', 'High', 'Low', 'Close', 'Volume']]
     except:
         pass
 
-    # 備用穩定擬真數據產生器（涵蓋最近 5 個交易日，確保一定有資料）
+    # 備用穩定擬真數據產生器
     dates_range = pd.date_range(end=datetime.today(), periods=5, freq="B")
     records = []
     np.random.seed(42)
@@ -163,7 +161,7 @@ def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
 def render_daytrade_replay_ui():
     init_replay_state()
     st.title("🎯 專業當沖覆盤模擬：江波圖(均價線VWAP)與分K(EMA)雙效同步系統")
-    st.markdown("左側呈現江波圖與當日成交均價(VWAP)，右側呈現多週期分K圖與 EMA 指數均線，X軸固定 09:00 ~ 13:30 全天候展開！")
+    st.markdown("左側呈現江波圖與當日成交均價(VWAP)，右側呈現多週期分K圖與 EMA 指數均線，圖表嚴格依時間進度同步運行！")
     
     # 1. 抓取資料
     col_s1, col_s2, col_s3, col_s4 = st.columns([2, 2, 2, 2])
@@ -250,23 +248,33 @@ def render_daytrade_replay_ui():
         else:
             st.success("已播放至收盤")
 
-    # 取得當前時間進度資料片段
+    # 💡 核心修正：嚴格依據時間進度滑桿截斷資料片段（只顯示到當前進度點，後面尚未發生的時間不畫出來）
     df_curr_raw = df_day.iloc[:st.session_state.replay_step].copy()
     latest_row = df_curr_raw.iloc[-1]
     curr_time = latest_row["Time_Str"]
-    curr_price = float(latest_row["Close"])
+    curr_open = float(latest_row["Open"])
+    curr_high = float(latest_row["High"])
+    curr_low = float(latest_row["Low"])
+    curr_close = float(latest_row["Close"])
     
-    st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price:.2f} 元")
-    
-    # 左右雙欄同時顯示（左：江波圖 + VWAP，右：分K圖 + EMA）與下單面板
+    # 即時顯示開高低收看板
+    st.markdown(f"""
+    ### 📈 標的：{stock_input} | 日期：{selected_date} | ⏰ 時間：{curr_time}
+    """)
+    m_o, m_h, m_l, m_c = st.columns(4)
+    m_o.metric("開盤價 (Open)", f"{curr_open:.2f}")
+    m_h.metric("最高價 (High)", f"{curr_high:.2f}")
+    m_l.metric("最低價 (Low)", f"{curr_low:.2f}")
+    m_c.metric("收盤價 (Close)", f"{curr_close:.2f}", delta=f"{curr_close - curr_open:.2f}")
+
+    # 左右雙欄圖表與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
-    # 1. 左側：江波圖（分時走勢圖，內含當日成交均價 VWAP，X軸強制固定 09:00 ~ 13:30）
+    # 1. 左側：江波圖（嚴格只畫到當前進度，X軸固定 09:00 ~ 13:30）
     with col_left_chart:
         st.markdown("#### 🌊 江波圖 (分時走勢與當日均價線 VWAP)")
         fig_tick = go.Figure()
         
-        # 計算當日成交均價 VWAP
         cum_vol = df_curr_raw["Volume"].cumsum()
         cum_val = (df_curr_raw["Close"] * df_curr_raw["Volume"]).cumsum()
         df_curr_raw["VWAP"] = np.where(cum_vol > 0, cum_val / cum_vol, df_curr_raw["Close"])
@@ -283,15 +291,15 @@ def render_daytrade_replay_ui():
         ))
         
         fig_tick.update_layout(
-            height=450,
+            height=430,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(range=["09:00", "13:30"]), # 💡 強制固定 X 軸範圍
+            xaxis=dict(range=["09:00", "13:30"]), # 💡 嚴格固定整天 X 軸
             template="plotly_dark",
             legend=dict(orientation="h", y=1.1)
         )
         st.plotly_chart(fig_tick, use_container_width=True)
 
-    # 2. 右側：多週期分K圖 + EMA（X軸強制固定 09:00 ~ 13:30）
+    # 2. 右側：多週期分K圖 + EMA（嚴格只畫到當前進度，X軸固定 09:00 ~ 13:30）
     with col_right_chart:
         st.markdown(f"#### 📊 {sub_timeframe} K線圖與指數均線 (EMA)")
         df_sub_resampled = resample_candles(df_curr_raw, sub_timeframe)
@@ -316,9 +324,9 @@ def render_daytrade_replay_ui():
                 ))
             
         fig_k.update_layout(
-            height=450,
+            height=430,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(range=["09:00", "13:30"]), # 💡 強制固定 X 軸範圍
+            xaxis=dict(range=["09:00", "13:30"]), # 💡 嚴格固定整天 X 軸
             xaxis_rangeslider_visible=False,
             template="plotly_dark",
             legend=dict(orientation="h", y=1.1)
@@ -334,8 +342,8 @@ def render_daytrade_replay_ui():
         c1, c2 = st.columns(2)
         with c1:
             if st.button("現股買進 (多)", use_container_width=True):
-                st.session_state.positions.append({"side": "LONG", "price": curr_price, "qty": trade_qty, "time": curr_time})
-                st.success(f"買進 {trade_qty} 張 @ {curr_price}")
+                st.session_state.positions.append({"side": "LONG", "price": curr_close, "qty": trade_qty, "time": curr_time})
+                st.success(f"買進 {trade_qty} 張 @ {curr_close}")
                 st.rerun()
         with c2:
             if st.button("多單平倉", use_container_width=True):
@@ -343,8 +351,8 @@ def render_daytrade_replay_ui():
                 if long_poss:
                     pos = long_poss[0]
                     st.session_state.positions.remove(pos)
-                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"], "LONG")
-                    st.session_state.trade_history.append({"strategy": "現股做多", "buy_time": pos["time"], "sell_time": curr_time, "buy_price": pos["price"], "sell_price": curr_price, "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
+                    pnl, cost = calc_daytrade_cost(pos["price"], curr_close, pos["qty"], "LONG")
+                    st.session_state.trade_history.append({"strategy": "現股做多", "buy_time": pos["time"], "sell_time": curr_time, "buy_price": pos["price"], "sell_price": curr_close, "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
                     st.success(f"多單平倉！損益: {round(pnl)}元")
                     st.rerun()
                 else:
@@ -354,8 +362,8 @@ def render_daytrade_replay_ui():
         c3, c4 = st.columns(2)
         with c3:
             if st.button("現股賣出 (空)", use_container_width=True):
-                st.session_state.positions.append({"side": "SHORT", "price": curr_price, "qty": trade_qty, "time": curr_time})
-                st.success(f"放空 {trade_qty} 張 @ {curr_price}")
+                st.session_state.positions.append({"side": "SHORT", "price": curr_close, "qty": trade_qty, "time": curr_time})
+                st.success(f"放空 {trade_qty} 張 @ {curr_close}")
                 st.rerun()
         with c4:
             if st.button("空單平倉", use_container_width=True):
@@ -363,8 +371,8 @@ def render_daytrade_replay_ui():
                 if short_poss:
                     pos = short_poss[0]
                     st.session_state.positions.remove(pos)
-                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"], "SHORT")
-                    st.session_state.trade_history.append({"strategy": "現股做空", "buy_time": curr_time, "sell_time": pos["time"], "buy_price": curr_price, "sell_price": pos["price"], "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
+                    pnl, cost = calc_daytrade_cost(pos["price"], curr_close, pos["qty"], "SHORT")
+                    st.session_state.trade_history.append({"strategy": "現股做空", "buy_time": curr_time, "sell_time": pos["time"], "buy_price": curr_close, "sell_price": pos["price"], "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
                     st.success(f"空單平倉！損益: {round(pnl)}元")
                     st.rerun()
                 else:
