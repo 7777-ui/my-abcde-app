@@ -5,14 +5,14 @@ import numpy as np
 import re
 import os
 import base64
-import pytz
 import requests
-import glob
-from datetime import datetime, time, timedelta
+import time as t_time
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
 
 ### --- 0. 🚀 即時數據抓取函數 ---
+@st.cache_data(ttl=10)
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
@@ -35,7 +35,7 @@ def get_realtime_price(stock_id):
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
-### --- 1. 網頁配置與背景設置 (完美保留您的背景圖與樣式) ---
+### --- 1. 網頁配置與背景設置 (完美保留您的背景與樣式) ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
@@ -75,147 +75,254 @@ if not st.session_state.password_correct:
 
 
 # ==========================================
-# 🎯 3. 當沖覆盤模擬系統核心模組
+# 🎯 3. 專業級當沖覆盤模擬系統核心模組
 # ==========================================
 def init_replay_state():
     if "replay_step" not in st.session_state:
         st.session_state.replay_step = 1
     if "positions" not in st.session_state:
-        st.session_state.positions = []
+        st.session_state.positions = [] # 記錄庫存部位 [{"side": "LONG"/"SHORT", "price": val, "qty": x, "time": t}]
     if "trade_history" not in st.session_state:
         st.session_state.trade_history = []
     if "capital" not in st.session_state:
         st.session_state.capital = 1000000
 
 @st.cache_data
-def generate_mock_intraday_data():
-    dates = pd.date_range("09:00", "13:30", freq="1min")
-    np.random.seed(42)
-    price = 100.0
-    records = []
-    for t in dates:
-        change = np.random.normal(0, 0.3)
-        open_p = price
-        close_p = price + change
-        high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
-        low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
-        vol = int(np.random.randint(10, 500))
-        price = close_p
-        records.append({
-            "Time": t.strftime("%H:%M"),
-            "Open": round(open_p, 2),
-            "High": round(high_p, 2),
-            "Low": round(low_p, 2),
-            "Close": round(close_p, 2),
-            "Volume": vol
-        })
-    return pd.DataFrame(records)
+def load_replay_data(stock_code):
+    """ 從 Yahoo Finance 抓取真實歷史分K或日線進行覆盤，若失敗則使用擬真數據 """
+    try:
+        df = yf.download(stock_code, period="5d", interval="1m", progress=False)
+        if df.empty or len(df) < 30:
+            raise Exception("資料不足")
+        # 處理 MultiIndex 欄位
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.reset_index()
+        # 重新命名
+        df = df.rename(columns={"Datetime": "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
+        df["Time"] = pd.to_datetime(df["Time"]).dt.strftime("%Y-%m-%d %H:%M")
+        return df
+    except:
+        # 備用：若無法取得則產生擬真當日分K
+        dates = pd.date_range("09:00", "13:30", freq="1min")
+        np.random.seed(42)
+        price = 100.0
+        records = []
+        for t in dates:
+            change = np.random.normal(0, 0.3)
+            open_p = price
+            close_p = price + change
+            high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
+            low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
+            vol = int(np.random.randint(10, 500))
+            price = close_p
+            records.append({
+                "Time": t.strftime("2026-06-06 %H:%M"),
+                "Open": round(open_p, 2),
+                "High": round(high_p, 2),
+                "Low": round(low_p, 2),
+                "Close": round(close_p, 2),
+                "Volume": vol
+            })
+        return pd.DataFrame(records)
 
-def calc_daytrade_cost(buy_price, sell_price, qty, fee_discount=0.28):
+def resample_candles(df, timeframe):
+    if timeframe == "1min" or timeframe == "江波圖":
+        return df
+    # 轉換頻率
+    rule_map = {"3min": "3min", "5min": "5min", "15min": "15min", "日K": "1D"}
+    rule = rule_map.get(timeframe, "5min")
+    
+    df['Time_dt'] = pd.to_datetime(df['Time'])
+    df = df.set_index('Time_dt')
+    
+    agg_dict = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
+    df_resampled = df.resample(rule).agg(agg_dict).dropna().reset_index()
+    df_resampled['Time'] = df_resampled['Time_dt'].dt.strftime("%Y-%m-%d %H:%M")
+    return df_resampled
+
+def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
+    # side: "LONG" (先買後賣) 或 "SHORT" (先賣後買)
     buy_val = buy_price * qty * 1000
     sell_val = sell_price * qty * 1000
+    
     buy_fee = buy_val * 0.001425 * fee_discount
     sell_fee = sell_val * 0.001425 * fee_discount
     tax = sell_val * 0.0015 # 現股當沖證交稅 0.15%
-    net_pnl = (sell_val - buy_val) - (buy_fee + sell_fee + tax)
+    
+    if side == "LONG":
+        net_pnl = (sell_val - buy_val) - (buy_fee + sell_fee + tax)
+    else: # SHORT
+        net_pnl = (buy_val - sell_val) - (buy_fee + sell_fee + tax)
+        
     return net_pnl, buy_fee + sell_fee + tax
 
 def render_daytrade_replay_ui():
     init_replay_state()
-    st.title("🎯 當沖擬真覆盤模擬系統")
-    st.markdown("在此模式下，您可以依據歷史分K進行逐根推進與模擬當沖交易，嚴格防範前瞻偏誤，並自動扣除台股當沖成本。")
+    st.title("🎯 專業當沖覆盤模擬與江波圖系統")
+    st.markdown("支援自由輸入股票代號、多週期分K、均線設定、江波圖、自動連續播放及多空雙向模擬交易！")
     
-    df_all = generate_mock_intraday_data()
+    # 頂部設定面板
+    col_s1, col_s2, col_s3, col_s4 = st.columns([2, 2, 2, 2])
+    with col_s1:
+        stock_input = st.text_input("🔍 輸入股票代號 (例: 2330.TW, 2603.TW)", value="2330.TW")
+    with col_s2:
+        chart_type = st.selectbox("📊 圖表類型", ["江波圖 (分時走勢)", "3分K", "5分K", "15分K", "日K"])
+    with col_s3:
+        show_ma = st.checkbox("顯示均線 (MA)", value=True)
+        ma_period = st.number_input("均線參數", min_value=1, max_value=60, value=5)
+    with col_s4:
+        playback_speed = st.selectbox("⏩ 自動播放速度", ["手動控制", "慢速 (1秒/根)", "中速 (0.5秒/根)"])
+
+    # 載入資料
+    df_all = load_replay_data(stock_input)
     total_steps = len(df_all)
     
-    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([2, 2, 2, 2])
+    # 時間軸與控制列
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4, ctrl_col5 = st.columns([3, 1, 1, 1, 1])
     with ctrl_col1:
         st.session_state.replay_step = st.slider(
             "⏱️ 盤中時間進度 (K線根數)", 
             min_value=1, 
             max_value=total_steps, 
-            value=st.session_state.replay_step
+            value=min(st.session_state.replay_step, total_steps)
         )
     with ctrl_col2:
-        if st.button("▶️ 下一根 K 棒", use_container_width=True):
+        if st.button("▶️ 下一根"):
             if st.session_state.replay_step < total_steps:
                 st.session_state.replay_step += 1
                 st.rerun()
     with ctrl_col3:
-        if st.button("⏩ 快進 5 根", use_container_width=True):
-            if st.session_state.replay_step + 5 <= total_steps:
-                st.session_state.replay_step += 5
-                st.rerun()
-    with ctrl_col4:
-        if st.button("🔄 重置覆盤", use_container_width=True):
+        if st.button("⏮️ 重置"):
             st.session_state.replay_step = 1
             st.session_state.positions = []
             st.session_state.trade_history = []
             st.rerun()
-            
-    df_curr = df_all.iloc[:st.session_state.replay_step]
+    with ctrl_col4:
+        play_clicked = st.button("🔄 自動播放")
+    with ctrl_col5:
+        st.markdown(f"**總根數:** {total_steps}")
+
+    # 自動播放迴圈邏輯
+    if play_clicked:
+        placeholder_info = st.empty()
+        for s in range(st.session_state.replay_step, total_steps + 1):
+            st.session_state.replay_step = s
+            placeholder_info.text(f"正在播放進度... {s}/{total_steps}")
+            t_time.sleep(0.5 if "慢速" in playback_speed else 0.2)
+            st.rerun()
+
+    # 取得當前切片資料
+    df_curr_raw = df_all.iloc[:st.session_state.replay_step]
+    df_curr = resample_candles(df_curr_raw, chart_type)
+    
+    if df_curr.empty:
+        st.warning("目前進度資料不足，請點擊下一根或重置。")
+        return
+
     latest_row = df_curr.iloc[-1]
     curr_time = latest_row["Time"]
     curr_price = latest_row["Close"]
     
+    # 主圖表與下單面板佈局
     col_chart, col_trade = st.columns([3, 1])
     
     with col_chart:
-        st.subheader(f"📊 當前時間：{curr_time} | 最新報價：{curr_price} 元")
-        fig = go.Figure(data=[go.Candlestick(
-            x=df_curr['Time'],
-            open=df_curr['Open'],
-            high=df_curr['High'],
-            low=df_curr['Low'],
-            close=df_curr['Close'],
-            increasing_line_color='red',
-            decreasing_line_color='green'
-        )])
-        fig.update_layout(
-            height=450,
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_rangeslider_visible=False,
-            template="plotly_dark"
-        )
+        st.subheader(f"📈 標的：{stock_input} | 時間：{curr_time} | 最新價：{curr_price} 元")
+        
+        fig = go.Figure()
+        
+        if chart_type == "江波圖 (分時走勢)":
+            # 繪製江波圖（折線圖 + 成交量）
+            fig.add_trace(go.Scatter(
+                x=df_curr['Time'], y=df_curr['Close'],
+                mode='lines+markers', name='江波價',
+                line=dict(color='#00FFCC', width=2)
+            ))
+            if show_ma and len(df_curr) >= ma_period:
+                df_curr['MA'] = df_curr['Close'].rolling(window=ma_period).mean()
+                fig.add_trace(go.Scatter(
+                    x=df_curr['Time'], y=df_curr['MA'],
+                    mode='lines', name=f'MA {ma_period}',
+                    line=dict(color='#FFD700', width=1.5, dash='dot')
+                ))
+            fig.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10), template="plotly_dark")
+        else:
+            # 繪製 K 線圖
+            fig.add_trace(go.Candlestick(
+                x=df_curr['Time'],
+                open=df_curr['Open'], high=df_curr['High'],
+                low=df_curr['Low'], close=df_curr['Close'],
+                increasing_line_color='red', decreasing_line_color='green',
+                name=chart_type
+            ))
+            if show_ma and len(df_curr) >= ma_period:
+                df_curr['MA'] = df_curr['Close'].rolling(window=ma_period).mean()
+                fig.add_trace(go.Scatter(
+                    x=df_curr['Time'], y=df_curr['MA'],
+                    mode='lines', name=f'MA {ma_period}',
+                    line=dict(color='#FFD700', width=1.5)
+                ))
+            fig.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False, template="plotly_dark")
+            
         st.plotly_chart(fig, use_container_width=True)
 
     with col_trade:
-        st.subheader("⚡ 當沖下單面板")
-        trade_qty = st.number_input("下單張數", min_value=1, max_value=10, value=1)
+        st.subheader("⚡ 閃電下單面板")
+        trade_qty = st.number_input("委託張數", min_value=1, max_value=20, value=1)
         
-        btn_buy, btn_sell = st.columns(2)
-        with btn_buy:
-            if st.button("🔴 現股買進", use_container_width=True):
-                st.session_state.positions.append({
-                    "type": "BUY",
-                    "price": curr_price,
-                    "qty": trade_qty,
-                    "time": curr_time
-                })
-                st.success(f"已買進 {trade_qty} 張 @ {curr_price}")
+        st.markdown("#### 🔴 做多專區 (先買後賣)")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("現股買進 (多)", use_container_width=True):
+                st.session_state.positions.append({"side": "LONG", "price": curr_price, "qty": trade_qty, "time": curr_time})
+                st.success(f"買進 {trade_qty} 張 @ {curr_price}")
                 st.rerun()
-                
-        with btn_sell:
-            if st.button("🟢 當沖平倉", use_container_width=True):
-                if len(st.session_state.positions) > 0:
-                    pos = st.session_state.positions.pop(0)
-                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"])
-                    st.session_state.trade_history.append({
-                        "buy_time": pos["time"],
-                        "sell_time": curr_time,
-                        "buy_price": pos["price"],
-                        "sell_price": curr_price,
-                        "qty": pos["qty"],
-                        "pnl": round(pnl),
-                        "cost": round(cost)
-                    })
-                    st.success(f"已平倉！損益：{round(pnl)} 元")
+        with c2:
+            if st.button("多單平倉", use_container_width=True):
+                long_poss = [p for p in st.session_state.positions if p["side"] == "LONG"]
+                if long_poss:
+                    pos = long_poss[0]
+                    st.session_state.positions.remove(pos)
+                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"], "LONG")
+                    st.session_state.trade_history.append({"strategy": "現股做多", "buy_time": pos["time"], "sell_time": curr_time, "buy_price": pos["price"], "sell_price": curr_price, "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
+                    st.success(f"多單平倉！損益: {round(pnl)}元")
                     st.rerun()
                 else:
-                    st.warning("無持倉部位可平")
+                    st.warning("無多單部位")
 
+        st.markdown("#### 🟢 做空專區 (先賣後買)")
+        c3, c4 = st.columns(2)
+        with c3:
+            if st.button("現股賣出 (空)", use_container_width=True):
+                st.session_state.positions.append({"side": "SHORT", "price": curr_price, "qty": trade_qty, "time": curr_time})
+                st.success(f"放空 {trade_qty} 張 @ {curr_price}")
+                st.rerun()
+        with c4:
+            if st.button("空單平倉", use_container_width=True):
+                short_poss = [p for p in st.session_state.positions if p["side"] == "SHORT"]
+                if short_poss:
+                    pos = short_poss[0]
+                    st.session_state.positions.remove(pos)
+                    # 針對做空：買回平倉價用 curr_price，放空價用 pos["price"]
+                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"], "SHORT")
+                    st.session_state.trade_history.append({"strategy": "現股做空", "buy_time": curr_time, "sell_time": pos["time"], "buy_price": curr_price, "sell_price": pos["price"], "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
+                    st.success(f"空單平倉！損益: {round(pnl)}元")
+                    st.rerun()
+                else:
+                    st.warning("無空單部位")
+
+        st.markdown("---")
+        st.markdown("#### 📋 目前持倉部位")
+        if st.session_state.positions:
+            for i, p in enumerate(st.session_state.positions):
+                st.info(f"[{p['side']}] {p['qty']}張 @ {p['price']} (時間:{p['time']})")
+        else:
+            st.caption("目前無持倉")
+
+    # --- 4. 績效統計與明細表 ---
     st.markdown("---")
-    st.subheader("📈 當日覆盤績效與交易明細")
+    st.subheader("📈 當日覆盤績效報表")
     
     if st.session_state.trade_history:
         df_history = pd.DataFrame(st.session_state.trade_history)
@@ -231,47 +338,42 @@ def render_daytrade_replay_ui():
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("已實現總損益", f"{total_pnl:,.0f} 元")
-        m2.metric("勝率 (Win Rate)", f"{win_rate:.1%}")
+        m2.metric("勝率", f"{win_rate:.1%}")
         m3.metric("風報比 (R:R)", f"{rr_ratio:.2f}")
         m4.metric("總交易次數", f"{total_trades} 次")
 
-        st.markdown("#### 核心交易報表")
         summary_table = pd.DataFrame([{
             "年度": "當日覆盤",
-            "策略": "當沖擬真交易",
+            "策略": "多空當沖模擬",
             "交易次數": total_trades,
             "成功 / 失敗": f"{len(wins)} / {len(losses)}",
             "單次平均獲利": f"{avg_win:,.0f}",
             "單次平均虧損": f"{avg_loss:,.0f}",
             "勝率": f"{win_rate:.1%}",
             "風報比(R:R)": f"{rr_ratio:.2f}",
-            "當日報酬率": f"{(total_pnl / st.session_state.capital):.2%}"
+            "年度報酬率": f"{(total_pnl / st.session_state.capital):.2%}"
         }])
         st.table(summary_table)
-
-        st.markdown("#### 交易明細")
         st.dataframe(df_history, use_container_width=True)
     else:
-        st.info("尚無平倉交易紀錄，請在上方進行模擬下單。")
+        st.info("尚無平倉交易紀錄。")
 
 
 # ==========================================
-# 🧭 4. 主側邊欄導覽選單 (在這裡切換您的策略)
+# 🧭 5. 主側邊欄導覽選單
 # ==========================================
 st.sidebar.title("🛠️ 戰情控制台")
 app_mode = st.sidebar.radio(
     "選擇功能模式：",
-    ["📊 姊布林 ABCDE 主戰情室", "🎯 當沖覆盤模擬系統"]
+    ["📊 姊布林 ABCDE 主戰情室", "🎯 專業當沖覆盤模擬系統"]
 )
 
 if app_mode == "📊 姊布林 ABCDE 主戰情室":
     st.title("🏹 姊布林 ABCDE 戰情室")
     st.info("（此處為您原本的姊布林主戰情室介面與掃描邏輯）")
-    
-    # 範例測試按鈕
     if st.button("測試大盤即時報價"):
         tse_price = get_realtime_price('TSE')
         st.success(f"加權指數即時報價：{tse_price}")
 
-elif app_mode == "🎯 當沖覆盤模擬系統":
+elif app_mode == "🎯 專業當沖覆盤模擬系統":
     render_daytrade_replay_ui()
