@@ -89,7 +89,7 @@ def init_replay_state():
 
 @st.cache_data
 def load_replay_data(stock_code):
-    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並具備穩健的備用模擬機制 """
+    """ 從 Yahoo Finance 抓取近期真實歷史分K數據 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
         if df.empty or len(df) < 10:
@@ -104,7 +104,7 @@ def load_replay_data(stock_code):
         df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M")
         return df[['Time_dt', 'Date', 'Time_Str', 'Open', 'High', 'Low', 'Close', 'Volume']]
     except:
-        # 備用擬真數據產生器 (確保無網路或抓取失敗時也能正常覆盤)
+        # 備用擬真數據產生器
         dates_range = pd.date_range(end=datetime.today(), periods=5, freq="D")
         records = []
         np.random.seed(42)
@@ -179,35 +179,36 @@ def render_daytrade_replay_ui():
         show_ema = st.checkbox("右側分K顯示 EMA", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 3. 建立標準 09:00 ~ 13:30 完整時間軸並嚴格對齊 (徹底解決 nan 與空白問題)
+    # 3. 建立標準 09:00 ~ 13:30 完整時間軸（完全不用 merge，以 set_index 進行對齊，100% 避免型態錯誤）
     base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
-    df_standard = pd.DataFrame({"Time_dt": base_times})
-    df_standard["Date"] = selected_date
-    df_standard["Time_Str"] = df_standard["Time_dt"].dt.strftime("%H:%M")
+    df_day = pd.DataFrame({"Time_dt": base_times})
+    df_day["Date"] = selected_date
+    df_day["Time_Str"] = df_day["Time_dt"].dt.strftime("%H:%M")
 
     df_day_raw = df_raw[df_raw["Date"] == selected_date].copy()
     
-    if df_day_raw.empty:
-        # 若該日無資料，以預設基準價填滿
-        base_price = 100.0
-        df_day = df_standard.copy()
-        df_day["Open"] = base_price
-        df_day["High"] = base_price
-        df_day["Low"] = base_price
-        df_day["Close"] = base_price
-        df_day["Volume"] = 500
+    if not df_day_raw.empty:
+        df_day_raw = df_day_raw.set_index("Time_dt")
+        df_day = df_day.set_index("Time_dt")
+        df_day["Close"] = df_day_raw["Close"]
+        df_day["Open"] = df_day_raw["Open"]
+        df_day["High"] = df_day_raw["High"]
+        df_day["Low"] = df_day_raw["Low"]
+        df_day["Volume"] = df_day_raw["Volume"]
+        df_day = df_day.reset_index()
     else:
-        # 使用 merge 確保與標準 09:00-13:30 時間軸完美對齊，避免 NaN
-        df_day = pd.merge(df_standard, df_day_raw[['Time_dt', 'Open', 'High', 'Low', 'Close', 'Volume']], on="Time_dt", how="left")
-        df_day["Date"] = selected_date
-        df_day["Time_Str"] = df_day["Time_dt"].dt.strftime("%H:%M")
-        
-        # 前值補齊與預設值防護
-        df_day["Close"] = df_day["Close"].ffill().bfill().fillna(100.0)
-        df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
-        df_day["High"] = df_day["High"].fillna(df_day["Close"])
-        df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
-        df_day["Volume"] = df_day["Volume"].fillna(500)
+        df_day["Close"] = 100.0
+        df_day["Open"] = 100.0
+        df_day["High"] = 100.0
+        df_day["Low"] = 100.0
+        df_day["Volume"] = 500
+
+    # 前值補齊與預設值防護
+    df_day["Close"] = df_day["Close"].ffill().bfill().fillna(100.0)
+    df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
+    df_day["High"] = df_day["High"].fillna(df_day["Close"])
+    df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
+    df_day["Volume"] = df_day["Volume"].fillna(500)
 
     total_steps = len(df_day)
     
@@ -253,7 +254,7 @@ def render_daytrade_replay_ui():
     
     st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price:.2f} 元")
     
-    # 左右雙欄同時顯示（左：江波圖 + VWAP均價線，右：分K圖 + EMA）與下單面板
+    # 左右雙欄同時顯示（左：江波圖 + VWAP，右：分K圖 + EMA）與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
     # 1. 左側：江波圖（分時走勢圖，內含當日成交均價 VWAP）
@@ -261,7 +262,6 @@ def render_daytrade_replay_ui():
         st.markdown("#### 🌊 江波圖 (分時走勢與當日均價線 VWAP)")
         fig_tick = go.Figure()
         
-        # 計算當日成交均價 VWAP = 累積(成交價 * 成交量) / 累積(成交量)
         cum_vol = df_curr_raw["Volume"].cumsum()
         cum_val = (df_curr_raw["Close"] * df_curr_raw["Volume"]).cumsum()
         df_curr_raw["VWAP"] = np.where(cum_vol > 0, cum_val / cum_vol, df_curr_raw["Close"])
