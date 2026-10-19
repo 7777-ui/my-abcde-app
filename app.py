@@ -89,7 +89,7 @@ def init_replay_state():
 
 @st.cache_data
 def load_replay_data(stock_code):
-    """ 從 Yahoo Finance 抓取近期真實歷史分K數據 """
+    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並補齊 09:00 ~ 13:30 完整時間框架 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
         if df.empty or len(df) < 30:
@@ -132,7 +132,7 @@ def load_replay_data(stock_code):
         return pd.DataFrame(records)
 
 def resample_candles(df, timeframe):
-    if timeframe == "1min" or timeframe == "江波圖 (分時走勢)":
+    if timeframe == "1分K":
         return df
     rule_map = {"3分K": "3min", "5分K": "5min", "15分K": "15min", "日K": "1D"}
     rule = rule_map.get(timeframe, "5min")
@@ -157,8 +157,8 @@ def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
 
 def render_daytrade_replay_ui():
     init_replay_state()
-    st.title("🎯 專業當沖覆盤模擬與江波圖系統")
-    st.markdown("支援自由選擇覆盤日期、多週期分K、EMA 均線、自動連續播放及多空雙向模擬交易！")
+    st.title("🎯 專業當沖覆盤模擬：江波圖與分K雙效同步系統")
+    st.markdown("左側即時呈現江波圖（分時走勢），右側呈現多週期分K圖，支援 EMA 指數均線與自動連續播放覆盤！")
     
     # 1. 抓取資料
     col_s1, col_s2, col_s3, col_s4 = st.columns([2, 2, 2, 2])
@@ -167,22 +167,36 @@ def render_daytrade_replay_ui():
     
     df_raw = load_replay_data(stock_input)
     
-    # 2. 日期選擇器 (根據該股票擁有的歷史日期動態產生)
+    # 2. 日期選擇器
     available_dates = sorted(df_raw["Date"].unique()) if not df_raw.empty else [datetime.today().strftime("%Y-%m-%d")]
     with col_s2:
         selected_date = st.selectbox("📅 選擇覆盤日期", available_dates, index=len(available_dates)-1)
     
     with col_s3:
-        chart_type = st.selectbox("📊 圖表類型", ["江波圖 (分時走勢)", "3分K", "5分K", "15分K", "日K"])
+        sub_timeframe = st.selectbox("📊 右側分K週期選擇", ["1分K", "3分K", "5分K", "15分K", "日K"])
     with col_s4:
         show_ema = st.checkbox("顯示指數均線 (EMA)", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 過濾出當天資料
-    df_day = df_raw[df_raw["Date"] == selected_date].copy()
-    if df_day.empty:
+    # 過濾出當天資料並補齊 09:00 至 13:30 完整框架
+    df_day_full = df_raw[df_raw["Date"] == selected_date].copy()
+    if df_day_full.empty:
         st.warning(f"找不到 {selected_date} 的交易資料，請更換日期或代號。")
         return
+
+    # 產生標準 09:00 ~ 13:30 完整時間軸對齊
+    base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
+    df_standard = pd.DataFrame({"Time_dt": base_times})
+    df_standard["Date"] = selected_date
+    df_standard["Time_Str"] = df_standard["Time_dt"].dt.strftime("%H:%M")
+    
+    # 與實際抓取資料合併，確保沒有資料的時間點能平滑過渡（前值補齊）
+    df_day = pd.merge(df_standard, df_day_full, on=["Time_dt", "Date", "Time_Str"], how="left")
+    df_day["Close"] = df_day["Close"].ffill().bfill()
+    df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
+    df_day["High"] = df_day["High"].fillna(df_day["Close"])
+    df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
+    df_day["Volume"] = df_day["Volume"].fillna(0)
 
     total_steps = len(df_day)
     
@@ -211,69 +225,90 @@ def render_daytrade_replay_ui():
     with ctrl_col5:
         st.markdown(f"**進度:** {st.session_state.replay_step}/{total_steps}")
 
-    # 💡 修正自動播放：利用 st.empty 動態推進並自動 rerun 讓江波圖連續捲動
+    # 自動播放邏輯
     if play_clicked:
         if st.session_state.replay_step < total_steps:
-            t_time.sleep(0.3) # 播放速度間隔
+            t_time.sleep(0.3)
             st.session_state.replay_step += 1
             st.rerun()
         else:
             st.success("已播放至收盤")
 
-    # 取得當前時間進度資料
+    # 取得當前時間進度資料片段
     df_curr_raw = df_day.iloc[:st.session_state.replay_step]
-    df_curr = resample_candles(df_curr_raw, chart_type)
-    
-    if df_curr.empty:
-        st.warning("目前進度資料不足。")
-        return
-
-    latest_row = df_curr.iloc[-1]
+    latest_row = df_curr_raw.iloc[-1]
     curr_time = latest_row["Time_Str"]
     curr_price = latest_row["Close"]
     
-    col_chart, col_trade = st.columns([3, 1])
+    st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price} 元")
     
-    with col_chart:
-        st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} {curr_time} | 最新價：{curr_price} 元")
+    # 💡 核心變更：左右雙欄同時顯示（左：江波圖，右：分K圖）與下單面板
+    col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
+    
+    # 1. 左側：江波圖（分時走勢圖，強制 X 軸 09:00 ~ 13:30）
+    with col_left_chart:
+        st.markdown("#### 🌊 江波圖 (分時走勢)")
+        fig_tick = go.Figure()
         
-        fig = go.Figure()
-        
-        # 計算 EMA 指數移動平均線
-        if show_ema and len(df_curr) >= ema_period:
-            df_curr['EMA'] = df_curr['Close'].ewm(span=ema_period, adjust=False).mean()
+        # 計算江波圖 EMA
+        if show_ema and len(df_curr_raw) >= ema_period:
+            df_curr_raw['EMA'] = df_curr_raw['Close'].ewm(span=ema_period, adjust=False).mean()
 
-        if chart_type == "江波圖 (分時走勢)":
-            fig.add_trace(go.Scatter(
-                x=df_curr['Time_Str'], y=df_curr['Close'],
-                mode='lines+markers', name='江波價',
-                line=dict(color='#00FFCC', width=2)
+        fig_tick.add_trace(go.Scatter(
+            x=df_day["Time_Str"], y=df_day["Close"].iloc[:st.session_state.replay_step],
+            mode='lines', name='江波價',
+            line=dict(color='#00FFCC', width=2)
+        ))
+        if show_ema and 'EMA' in df_curr_raw.columns:
+            fig_tick.add_trace(go.Scatter(
+                x=df_curr_raw['Time_Str'], y=df_curr_raw['EMA'],
+                mode='lines', name=f'EMA {ema_period}',
+                line=dict(color='#FFD700', width=1.5, dash='dot')
             ))
-            if show_ema and 'EMA' in df_curr.columns:
-                fig.add_trace(go.Scatter(
-                    x=df_curr['Time_Str'], y=df_curr['EMA'],
-                    mode='lines', name=f'EMA {ema_period}',
-                    line=dict(color='#FFD700', width=1.5, dash='dot')
-                ))
-            fig.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10), template="plotly_dark")
-        else:
-            fig.add_trace(go.Candlestick(
-                x=df_curr['Time_Str'],
-                open=df_curr['Open'], high=df_curr['High'],
-                low=df_curr['Low'], close=df_curr['Close'],
-                increasing_line_color='red', decreasing_line_color='green',
-                name=chart_type
+        
+        # 強制 X 軸範圍從 09:00 到 13:30 完整展開
+        fig_tick.update_layout(
+            height=450,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis=dict(range=[df_day["Time_Str"].iloc[0], df_day["Time_Str"].iloc[-1]]),
+            template="plotly_dark",
+            legend=dict(orientation="h", y=1.1)
+        )
+        st.plotly_chart(fig_tick, use_container_width=True)
+
+    # 2. 右側：多週期分K圖
+    with col_right_chart:
+        st.markdown(f"#### 📊 {sub_timeframe} K線圖")
+        df_sub_resampled = resample_candles(df_curr_raw, sub_timeframe)
+        
+        fig_k = go.Figure()
+        if show_ema and len(df_sub_resampled) >= ema_period:
+            df_sub_resampled['EMA'] = df_sub_resampled['Close'].ewm(span=ema_period, adjust=False).mean()
+
+        fig_k.add_trace(go.Candlestick(
+            x=df_sub_resampled['Time_Str'],
+            open=df_sub_resampled['Open'], high=df_sub_resampled['High'],
+            low=df_sub_resampled['Low'], close=df_sub_resampled['Close'],
+            increasing_line_color='red', decreasing_line_color='green',
+            name=sub_timeframe
+        ))
+        if show_ema and 'EMA' in df_sub_resampled.columns:
+            fig_k.add_trace(go.Scatter(
+                x=df_sub_resampled['Time_Str'], y=df_sub_resampled['EMA'],
+                mode='lines', name=f'EMA {ema_period}',
+                line=dict(color='#FFD700', width=1.5)
             ))
-            if show_ema and 'EMA' in df_curr.columns:
-                fig.add_trace(go.Scatter(
-                    x=df_curr['Time_Str'], y=df_curr['EMA'],
-                    mode='lines', name=f'EMA {ema_period}',
-                    line=dict(color='#FFD700', width=1.5)
-                ))
-            fig.update_layout(height=480, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False, template="plotly_dark")
             
-        st.plotly_chart(fig, use_container_width=True)
+        fig_k.update_layout(
+            height=450,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            legend=dict(orientation="h", y=1.1)
+        )
+        st.plotly_chart(fig_k, use_container_width=True)
 
+    # 3. 閃電下單與部位管理面板
     with col_trade:
         st.subheader("⚡ 閃電下單面板")
         trade_qty = st.number_input("委託張數", min_value=1, max_value=20, value=1)
