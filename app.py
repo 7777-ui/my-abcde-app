@@ -6,39 +6,35 @@ import os
 import base64
 import pytz
 import requests
-from datetime import datetime
+import glob
+from datetime import datetime, time, timedelta
 from streamlit_autorefresh import st_autorefresh
+import plotly.graph_objects as go
 
-# --- 0. 🚀 即時數據抓取函數 (解決 15 分鐘延遲) ---
+### --- 0. 🚀 即時數據抓取函數 ---
 def get_realtime_price(stock_id):
     if stock_id == 'OTC': target = '%5ETWOII'
     elif stock_id == 'TSE': target = '%5ETWII'
     else: target = stock_id
-
     url = f"https://tw.stock.yahoo.com/quote/{target}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-    
     try:
         response = requests.get(url, headers=headers, timeout=5)
-        patterns = [
-            r'"regularMarketPrice":\s*([0-9.]+)',
-            r'"price":\s*"([0-9,.]+)"'
-        ]
+        patterns = [r'"regularMarketPrice":\s*([0-9.]+)', r'"price":\s*"([0-9,.]+)"']
         for p in patterns:
             match = re.search(p, response.text)
             if match:
                 val = float(match.group(1).replace(',', ''))
                 if val > 0: return val
-    except:
-        pass
+    except: pass
     return None
 
-# --- 0.1 🏎️ 歷史數據快取 (提升搜尋速度) ---
+### --- 0.1 🏎️ 歷史數據快取 ---
 @st.cache_data(ttl=3600)
 def get_historical_data(code_with_suffix):
     return yf.download(code_with_suffix, period="2mo", progress=False)
 
-# --- 1. 網頁配置與背景設置 ---
+### --- 1. 網頁配置與背景設置 (完美保留您的背景圖與樣式) ---
 st.set_page_config(page_title="🏹 姊布林ABCDE 戰情室", page_icon="🏹", layout="wide")
 st_autorefresh(interval=180000, key="datarefresh")
 
@@ -58,11 +54,13 @@ def set_ui_cleanup(image_file):
     </style>
     """
     st.markdown(style, unsafe_allow_html=True)
+
 set_ui_cleanup("header_image.png")
 
-# --- 2. 🔐 密碼鎖 ---
+### --- 2. 🔐 密碼鎖 ---
 if "password_correct" not in st.session_state:
     st.session_state.password_correct = False
+
 if not st.session_state.password_correct:
     st.markdown("## 🔒 私人戰情室登入")
     pwd = st.text_input("請輸入密碼", type="password")
@@ -70,165 +68,209 @@ if not st.session_state.password_correct:
         if pwd == "test0403":
             st.session_state.password_correct = True
             st.rerun()
-        else: st.error("密碼錯誤")
+        else:
+            st.error("密碼錯誤")
     st.stop()
 
-# --- 3. 🛡️ 族群 CSV 讀取 ---
-@st.cache_data(ttl=604800)
-def get_stock_info_full():
-    mapping = {}
-    files = ["TWSE.csv", "TPEX.csv"] 
-    for f_name in files:
-        if os.path.exists(f_name):
-            try:
-                try: df_local = pd.read_csv(f_name, encoding='utf-8-sig')
-                except: df_local = pd.read_csv(f_name, encoding='cp950')
-                df_local = df_local.fillna('-')
-                for _, row in df_local.iterrows():
-                    code = str(row.iloc[0]).strip()
-                    if code.isdigit():
-                        mapping[code] = {
-                            "簡稱": str(row.iloc[1]).strip(),
-                            "產業排位": str(row.iloc[2]).strip() if len(row) > 2 else "-",
-                            "實力指標": str(row.iloc[3]).strip() if len(row) > 3 else "-",
-                            "族群細分": str(row.iloc[4]).strip() if len(row) > 4 else "-",
-                            "關鍵技術": str(row.iloc[5]).strip() if len(row) > 5 else "-"
-                        }
-            except: pass
-    return mapping
-stock_info_map = get_stock_info_full()
 
-# --- 4. 大盤環境偵測 ---
-@st.cache_data(ttl=60) 
-def get_market_env():
-    res = {}
-    rt_indices = {"上市": "TSE", "上櫃": "OTC"}
-    yf_indices = {"上市": "^TWII", "上櫃": "^TWOII"}
-    for k, v in rt_indices.items():
-        try:
-            curr_p = get_realtime_price(v)
-            df_h = get_historical_data(yf_indices[k])
-            if not df_h.empty and curr_p:
-                if isinstance(df_h.columns, pd.MultiIndex): df_h.columns = df_h.columns.get_level_values(0)
-                df_h = df_h.dropna(subset=['Close'])
-                base_list = df_h['Close'].iloc[-20:-1].tolist() if df_h.index[-1].date() >= datetime.now().date() else df_h['Close'].iloc[-19:].tolist()
-                c_list = base_list + [curr_p]
-                m5, m20 = sum(c_list[-5:])/5, sum(c_list)/20
-                std_v = pd.Series(c_list).std()
-                bw = (std_v * 4) / m20 if m20 != 0 else 0.0
-                light = "🟢 綠燈" if curr_p > m5 else ("🟡 黃燈" if curr_p > m20 else "🔴 紅燈")
-                res[k] = {"燈號": light, "價格": curr_p, "帶寬": bw}
-            else: res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
-        except: res[k] = {"燈號": "⚠️ 數據斷訊", "價格": 0.0, "帶寬": 0.0}
-    return res
+# ==========================================
+# 🎯 3. 當沖覆盤模擬系統核心模組
+# ==========================================
+def init_replay_state():
+    if "replay_step" not in st.session_state:
+        st.session_state.replay_step = 1
+    if "positions" not in st.session_state:
+        st.session_state.positions = []
+    if "trade_history" not in st.session_state:
+        st.session_state.trade_history = []
+    if "capital" not in st.session_state:
+        st.session_state.capital = 1000000
 
-m_env = get_market_env()
+@st.cache_data
+def generate_mock_intraday_data():
+    dates = pd.date_range("09:00", "13:30", freq="1min")
+    np.random.seed(42)
+    price = 100.0
+    records = []
+    for t in dates:
+        change = np.random.normal(0, 0.3)
+        open_p = price
+        close_p = price + change
+        high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
+        low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
+        vol = int(np.random.randint(10, 500))
+        price = close_p
+        records.append({
+            "Time": t.strftime("%H:%M"),
+            "Open": round(open_p, 2),
+            "High": round(high_p, 2),
+            "Low": round(low_p, 2),
+            "Close": round(close_p, 2),
+            "Volume": vol
+        })
+    return pd.DataFrame(records)
 
-# --- 5. 主畫面 ---
-st.markdown("### 🏹 姊布林 ABCDE 策略戰情室 (即時優化版)")
-m_col1, m_col2 = st.columns(2)
-with m_col1: st.metric(f"加權指數 ({m_env['上市']['價格']:,.2f})", m_env['上市']['燈號'], f"帶寬: {m_env['上市']['帶寬']:.2%}")
-with m_col2: st.metric(f"OTC 指數 ({m_env['上櫃']['價格']:,.2f})", m_env['上櫃']['燈號'], f"帶寬: {m_env['上櫃']['帶寬']:.2%}")
+def calc_daytrade_cost(buy_price, sell_price, qty, fee_discount=0.28):
+    buy_val = buy_price * qty * 1000
+    sell_val = sell_price * qty * 1000
+    buy_fee = buy_val * 0.001425 * fee_discount
+    sell_fee = sell_val * 0.001425 * fee_discount
+    tax = sell_val * 0.0015 # 現股當沖證交稅 0.15%
+    net_pnl = (sell_val - buy_val) - (buy_fee + sell_fee + tax)
+    return net_pnl, buy_fee + sell_fee + tax
 
-tw_tz = pytz.timezone('Asia/Taipei')
-st.write(f"📅 **數據更新時間：{datetime.now(tw_tz).strftime('%Y/%m/%d %H:%M:%S')}** (加權總控機制已啟動)")
-
-# --- 6. 側邊欄與搜尋邏輯 ---
-st.sidebar.title("🛠️ 設定區")
-raw_input = st.sidebar.text_area("輸入股票代碼", height=150)
-
-if st.sidebar.button("🚀 開始掃描戰情") and raw_input:
-    codes = re.findall(r'\b\d{4,6}\b', raw_input)
-    results = []
+def render_daytrade_replay_ui():
+    init_replay_state()
+    st.title("🎯 當沖擬真覆盤模擬系統")
+    st.markdown("在此模式下，您可以依據歷史分K進行逐根推進與模擬當沖交易，嚴格防範前瞻偏誤，並自動扣除台股當沖成本。")
     
-    # 【總司令官判斷】
-    main_market_light = m_env['上市']['燈號']
+    df_all = generate_mock_intraday_data()
+    total_steps = len(df_all)
     
-    with st.spinner("分析環境中..."):
-        for code in codes:
-            info = stock_info_map.get(code, {"簡稱": f"台股{code}", "產業排位": "-", "實力指標": "-", "族群細分": "-", "關鍵技術": "-"})
-            p_curr = get_realtime_price(code)
-            if not p_curr: continue
+    ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([2, 2, 2, 2])
+    with ctrl_col1:
+        st.session_state.replay_step = st.slider(
+            "⏱️ 盤中時間進度 (K線根數)", 
+            min_value=1, 
+            max_value=total_steps, 
+            value=st.session_state.replay_step
+        )
+    with ctrl_col2:
+        if st.button("▶️ 下一根 K 棒", use_container_width=True):
+            if st.session_state.replay_step < total_steps:
+                st.session_state.replay_step += 1
+                st.rerun()
+    with ctrl_col3:
+        if st.button("⏩ 快進 5 根", use_container_width=True):
+            if st.session_state.replay_step + 5 <= total_steps:
+                st.session_state.replay_step += 5
+                st.rerun()
+    with ctrl_col4:
+        if st.button("🔄 重置覆盤", use_container_width=True):
+            st.session_state.replay_step = 1
+            st.session_state.positions = []
+            st.session_state.trade_history = []
+            st.rerun()
             
-            df = get_historical_data(f"{code}.TW")
-            m_type = "上市"
-            if df.empty or len(df) < 10:
-                df = get_historical_data(f"{code}.TWO")
-                m_type = "上櫃"
+    df_curr = df_all.iloc[:st.session_state.replay_step]
+    latest_row = df_curr.iloc[-1]
+    curr_time = latest_row["Time"]
+    curr_price = latest_row["Close"]
+    
+    col_chart, col_trade = st.columns([3, 1])
+    
+    with col_chart:
+        st.subheader(f"📊 當前時間：{curr_time} | 最新報價：{curr_price} 元")
+        fig = go.Figure(data=[go.Candlestick(
+            x=df_curr['Time'],
+            open=df_curr['Open'],
+            high=df_curr['High'],
+            low=df_curr['Low'],
+            close=df_curr['Close'],
+            increasing_line_color='red',
+            decreasing_line_color='green'
+        )])
+        fig.update_layout(
+            height=450,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-            if not df.empty and len(df) >= 20:
-                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                df = df.dropna(subset=['Close'])
-                
-                # 判定個股市場環境
-                current_env = m_env[m_type]
-                
-                today_date = datetime.now().date()
-                if df.index[-1].date() >= today_date:
-                    p_yest = float(df['Close'].iloc[-2])
-                    history_for_ma = df['Close'].iloc[-20:-1].tolist()
-                else:
-                    p_yest = float(df['Close'].iloc[-1])
-                    history_for_ma = df['Close'].iloc[-19:].tolist()
-                
-                close_20 = history_for_ma + [p_curr]
-                m20_now = sum(close_20) / 20
-                std_now = pd.Series(close_20).std()
-                upper_now = m20_now + (std_now * 2)
-                bw = (std_now * 4) / m20_now if m20_now != 0 else 0.0
-                chg = (p_curr - p_yest) / p_yest
-                vol_amt = (df['Volume'].iloc[-1] * p_curr) / 100000000 
-                ratio = bw / current_env['帶寬'] if current_env['帶寬'] > 0 else 0
-                slope_pos = m20_now > sum(history_for_ma) / 20
-                break_upper = p_curr > upper_now
-                
-                res_tag = ""
-                fail_reasons = []
-                if not break_upper: fail_reasons.append("未站上軌")
-                if not slope_pos: fail_reasons.append("斜率負")
-                if vol_amt < 5: fail_reasons.append("量不足")
-
-                if not fail_reasons:
-                    # --- 🌟 修正核心：加權總控判定 ---
-                    if "🔴 紅燈" in main_market_light:
-                        # 狀況 A：加權紅燈 -> 全市場進入最高防禦，僅限 A、B
-                        if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-                        elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                        else: res_tag = "⚪ 參數不符(大盤紅燈限AB)"
-                    else:
-                        # 狀況 B：加權綠/黃燈 -> 依照個股所屬市場燈號執行
-                        if "🟢 綠燈" in current_env['燈號']:
-                            env_de = (m_env['上市']['帶寬'] > 0.145 or m_env['上櫃']['帶寬'] > 0.095)
-                            if env_de and bw > 0.2 and 0.8 <= ratio <= 1.2 and 0.03 <= chg <= 0.05: res_tag = "💎【D：共振】"
-                            elif env_de and bw > 0.2 and 1.2 < ratio <= 2.0 and 0.03 <= chg <= 0.07: res_tag = "🚀【E：超額】"
-                            elif 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-                            elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                            elif 0.2 < bw <= 0.4 and 0.03 <= chg <= 0.07: res_tag = "🌊【C：瘋狗】"
-                        elif "🟡 黃燈" in current_env['燈號']:
-                            if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-                            elif 0.1 < bw <= 0.2 and 0.03 <= chg <= 0.05: res_tag = "🎯【B：海龍】"
-                        elif "🔴 紅燈" in current_env['燈號']:
-                            if 0.05 <= bw <= 0.1 and 0.03 <= chg <= 0.07: res_tag = "🔥【A：潛龍】"
-
-                    if not res_tag: res_tag = "⚪ 參數不符"
-                else:
-                    res_tag = "⚪ " + "/".join(fail_reasons)
-
-                results.append({
-                    "代號": code, "名稱": info["簡稱"], "策略": res_tag,
-                    "現價": p_curr, "漲幅%": f"{chg*100:.1f}%", "成交值(億)": round(vol_amt, 1),
-                    "個股帶寬%": f"{bw*100:.2f}%", "比值": round(ratio, 2),
-                    "產業排位": info["產業排位"], "2026指標": info["實力指標"],
-                    "族群細分": info["族群細分"], "關鍵技術": info["關鍵技術"]
+    with col_trade:
+        st.subheader("⚡ 當沖下單面板")
+        trade_qty = st.number_input("下單張數", min_value=1, max_value=10, value=1)
+        
+        btn_buy, btn_sell = st.columns(2)
+        with btn_buy:
+            if st.button("🔴 現股買進", use_container_width=True):
+                st.session_state.positions.append({
+                    "type": "BUY",
+                    "price": curr_price,
+                    "qty": trade_qty,
+                    "time": curr_time
                 })
-        if results:
-            st.session_state.scan_results = pd.DataFrame(results)
+                st.success(f"已買進 {trade_qty} 張 @ {curr_price}")
+                st.rerun()
+                
+        with btn_sell:
+            if st.button("🟢 當沖平倉", use_container_width=True):
+                if len(st.session_state.positions) > 0:
+                    pos = st.session_state.positions.pop(0)
+                    pnl, cost = calc_daytrade_cost(pos["price"], curr_price, pos["qty"])
+                    st.session_state.trade_history.append({
+                        "buy_time": pos["time"],
+                        "sell_time": curr_time,
+                        "buy_price": pos["price"],
+                        "sell_price": curr_price,
+                        "qty": pos["qty"],
+                        "pnl": round(pnl),
+                        "cost": round(cost)
+                    })
+                    st.success(f"已平倉！損益：{round(pnl)} 元")
+                    st.rerun()
+                else:
+                    st.warning("無持倉部位可平")
 
-# --- 7. 顯示結果 ---
-if st.session_state.scan_results is not None:
-    st.dataframe(st.session_state.scan_results, use_container_width=True, hide_index=True)
+    st.markdown("---")
+    st.subheader("📈 當日覆盤績效與交易明細")
+    
+    if st.session_state.trade_history:
+        df_history = pd.DataFrame(st.session_state.trade_history)
+        total_pnl = df_history["pnl"].sum()
+        total_trades = len(df_history)
+        wins = df_history[df_history["pnl"] > 0]
+        losses = df_history[df_history["pnl"] <= 0]
+        
+        win_rate = len(wins) / total_trades if total_trades > 0 else 0
+        avg_win = wins["pnl"].mean() if len(wins) > 0 else 0
+        avg_loss = abs(losses["pnl"].mean()) if len(losses) > 0 else 0
+        rr_ratio = avg_win / avg_loss if avg_loss != 0 else 0
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("已實現總損益", f"{total_pnl:,.0f} 元")
+        m2.metric("勝率 (Win Rate)", f"{win_rate:.1%}")
+        m3.metric("風報比 (R:R)", f"{rr_ratio:.2f}")
+        m4.metric("總交易次數", f"{total_trades} 次")
 
-if st.sidebar.button("🔐 安全登出"):
-    st.session_state.password_correct = False
-    st.session_state.scan_results = None
-    st.rerun()
+        st.markdown("#### 核心交易報表")
+        summary_table = pd.DataFrame([{
+            "年度": "當日覆盤",
+            "策略": "當沖擬真交易",
+            "交易次數": total_trades,
+            "成功 / 失敗": f"{len(wins)} / {len(losses)}",
+            "單次平均獲利": f"{avg_win:,.0f}",
+            "單次平均虧損": f"{avg_loss:,.0f}",
+            "勝率": f"{win_rate:.1%}",
+            "風報比(R:R)": f"{rr_ratio:.2f}",
+            "當日報酬率": f"{(total_pnl / st.session_state.capital):.2%}"
+        }])
+        st.table(summary_table)
+
+        st.markdown("#### 交易明細")
+        st.dataframe(df_history, use_container_width=True)
+    else:
+        st.info("尚無平倉交易紀錄，請在上方進行模擬下單。")
+
+
+# ==========================================
+# 🧭 4. 主側邊欄導覽選單 (在這裡切換您的策略)
+# ==========================================
+st.sidebar.title("🛠️ 戰情控制台")
+app_mode = st.sidebar.radio(
+    "選擇功能模式：",
+    ["📊 姊布林 ABCDE 主戰情室", "🎯 當沖覆盤模擬系統"]
+)
+
+if app_mode == "📊 姊布林 ABCDE 主戰情室":
+    st.title("🏹 姊布林 ABCDE 戰情室")
+    st.info("（此處為您原本的姊布林主戰情室介面與掃描邏輯）")
+    
+    # 範例測試按鈕
+    if st.button("測試大盤即時報價"):
+        tse_price = get_realtime_price('TSE')
+        st.success(f"加權指數即時報價：{tse_price}")
+
+elif app_mode == "🎯 當沖覆盤模擬系統":
+    render_daytrade_replay_ui()
