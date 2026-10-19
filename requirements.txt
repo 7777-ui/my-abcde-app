@@ -3,3 +3,9 @@ pandas
 requests
 lxml
 streamlit-autorefresh
+streamlit
+streamlit-autorefresh
+yfinance
+pandas
+requests
+plotly
