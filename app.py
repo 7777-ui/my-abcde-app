@@ -89,7 +89,7 @@ def init_replay_state():
 
 @st.cache_data
 def load_replay_data(stock_code):
-    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並補齊 09:00 ~ 13:30 完整時間框架 """
+    """ 從 Yahoo Finance 抓取近期真實歷史分K數據 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
         if df.empty or len(df) < 30:
@@ -178,25 +178,34 @@ def render_daytrade_replay_ui():
         show_ema = st.checkbox("顯示指數均線 (EMA)", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 過濾出當天資料並補齊 09:00 至 13:30 完整框架
+    # 3. 建立標準 09:00 ~ 13:30 完整時間軸，直接以reindex對齊（絕對不發生merge型態衝突）
+    base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
+    df_standard = pd.DataFrame({"Time_dt": base_times})
+    df_standard["Date"] = selected_date
+    df_standard["Time_Str"] = df_standard["Time_dt"].dt.strftime("%H:%M")
+
     df_day_full = df_raw[df_raw["Date"] == selected_date].copy()
     if df_day_full.empty:
         st.warning(f"找不到 {selected_date} 的交易資料，請更換日期或代號。")
         return
 
-    # 產生標準 09:00 ~ 13:30 完整時間軸對齊
-    base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
-    df_standard = pd.DataFrame({"Time_dt": base_times})
-    df_standard["Date"] = selected_date
-    df_standard["Time_Str"] = df_standard["Time_dt"].dt.strftime("%H:%M")
+    # 進行安全對齊與前值補齊
+    df_day_full = df_day_full.set_index("Time_dt")
+    df_day = df_standard.set_index("Time_dt")
+    df_day["Date"] = selected_date
+    df_day["Time_Str"] = df_day["Time_Str"]
+    df_day["Close"] = df_day_full["Close"]
+    df_day["Open"] = df_day_full["Open"]
+    df_day["High"] = df_day_full["High"]
+    df_day["Low"] = df_day_full["Low"]
+    df_day["Volume"] = df_day_full["Volume"]
     
-    # 與實際抓取資料合併，確保沒有資料的時間點能平滑過渡（前值補齊）
-    df_day = pd.merge(df_standard, df_day_full, on=["Time_dt", "Date", "Time_Str"], how="left")
     df_day["Close"] = df_day["Close"].ffill().bfill()
     df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
     df_day["High"] = df_day["High"].fillna(df_day["Close"])
     df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
     df_day["Volume"] = df_day["Volume"].fillna(0)
+    df_day = df_day.reset_index()
 
     total_steps = len(df_day)
     
@@ -242,7 +251,7 @@ def render_daytrade_replay_ui():
     
     st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price} 元")
     
-    # 💡 核心變更：左右雙欄同時顯示（左：江波圖，右：分K圖）與下單面板
+    # 左右雙欄同時顯示（左：江波圖，右：分K圖）與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
     # 1. 左側：江波圖（分時走勢圖，強制 X 軸 09:00 ~ 13:30）
@@ -250,7 +259,6 @@ def render_daytrade_replay_ui():
         st.markdown("#### 🌊 江波圖 (分時走勢)")
         fig_tick = go.Figure()
         
-        # 計算江波圖 EMA
         if show_ema and len(df_curr_raw) >= ema_period:
             df_curr_raw['EMA'] = df_curr_raw['Close'].ewm(span=ema_period, adjust=False).mean()
 
@@ -266,7 +274,6 @@ def render_daytrade_replay_ui():
                 line=dict(color='#FFD700', width=1.5, dash='dot')
             ))
         
-        # 強制 X 軸範圍從 09:00 到 13:30 完整展開
         fig_tick.update_layout(
             height=450,
             margin=dict(l=10, r=10, t=10, b=10),
@@ -361,7 +368,7 @@ def render_daytrade_replay_ui():
         else:
             st.caption("目前無持倉")
 
-    # --- 4. 績效統計與明細表 ---
+    # --- 4. 績效統計與明細表 (嚴格符合規範欄位) ---
     st.markdown("---")
     st.subheader("📈 當日覆盤績效報表")
     
