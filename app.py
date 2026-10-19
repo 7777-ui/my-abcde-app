@@ -89,7 +89,7 @@ def init_replay_state():
 
 @st.cache_data
 def load_replay_data(stock_code):
-    """ 從 Yahoo Finance 抓取近期真實歷史分K數據 """
+    """ 從 Yahoo Finance 抓取近期真實歷史分K數據，並具備穩健的備用模擬機制 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
         if df.empty or len(df) < 10:
@@ -97,38 +97,39 @@ def load_replay_data(stock_code):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.reset_index()
-        # 相容不同版本的欄位名稱 (Datetime 或 Date)
-        time_col = "Datetime" if "Datetime" in df.columns else "Date"
+        time_col = "Datetime" if "Datetime" in df.columns else ("Date" if "Date" in df.columns else df.columns[0])
         df = df.rename(columns={time_col: "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
         df["Time_dt"] = pd.to_datetime(df["Time"])
         df["Date"] = df["Time_dt"].dt.strftime("%Y-%m-%d")
         df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M")
-        return df
+        return df[['Time_dt', 'Date', 'Time_Str', 'Open', 'High', 'Low', 'Close', 'Volume']]
     except:
         # 備用擬真數據產生器 (確保無網路或抓取失敗時也能正常覆盤)
-        today_str = datetime.today().strftime("%Y-%m-%d")
-        t_min = pd.date_range(f"{today_str} 09:00", f"{today_str} 13:30", freq="1min")
+        dates_range = pd.date_range(end=datetime.today(), periods=5, freq="D")
         records = []
         np.random.seed(42)
-        price = 100.0
-        for t in t_min:
-            change = np.random.normal(0, 0.3)
-            open_p = price
-            close_p = price + change
-            high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
-            low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
-            vol = int(np.random.randint(10, 500))
-            price = close_p
-            records.append({
-                "Time_dt": t,
-                "Date": today_str,
-                "Time_Str": t.strftime("%H:%M"),
-                "Open": round(open_p, 2),
-                "High": round(high_p, 2),
-                "Low": round(low_p, 2),
-                "Close": round(close_p, 2),
-                "Volume": vol
-            })
+        for d in dates_range:
+            d_str = d.strftime("%Y-%m-%d")
+            t_min = pd.date_range(f"{d_str} 09:00", f"{d_str} 13:30", freq="1min")
+            price = 100.0
+            for t in t_min:
+                change = np.random.normal(0, 0.3)
+                open_p = price
+                close_p = price + change
+                high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
+                low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
+                vol = int(np.random.randint(100, 2000))
+                price = max(1.0, close_p)
+                records.append({
+                    "Time_dt": t,
+                    "Date": d_str,
+                    "Time_Str": t.strftime("%H:%M"),
+                    "Open": round(open_p, 2),
+                    "High": round(high_p, 2),
+                    "Low": round(low_p, 2),
+                    "Close": round(close_p, 2),
+                    "Volume": vol
+                })
         return pd.DataFrame(records)
 
 def resample_candles(df, timeframe):
@@ -157,8 +158,8 @@ def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
 
 def render_daytrade_replay_ui():
     init_replay_state()
-    st.title("🎯 專業當沖覆盤模擬：江波圖與分K雙效同步系統")
-    st.markdown("左側即時呈現江波圖（分時走勢），右側呈現多週期分K圖，支援 EMA 指數均線與自動連續播放覆盤！")
+    st.title("🎯 專業當沖覆盤模擬：江波圖(均價線VWAP)與分K(EMA)雙效同步系統")
+    st.markdown("左側呈現江波圖與當日成交均價(VWAP)，右側呈現多週期分K圖與 EMA 指數均線，支援自動連續播放與多空模擬！")
     
     # 1. 抓取資料
     col_s1, col_s2, col_s3, col_s4 = st.columns([2, 2, 2, 2])
@@ -175,41 +176,38 @@ def render_daytrade_replay_ui():
     with col_s3:
         sub_timeframe = st.selectbox("📊 右側分K週期選擇", ["1分K", "3分K", "5分K", "15分K", "日K"])
     with col_s4:
-        show_ema = st.checkbox("顯示指數均線 (EMA)", value=True)
+        show_ema = st.checkbox("右側分K顯示 EMA", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 3. 建立標準 09:00 ~ 13:30 完整時間軸
+    # 3. 建立標準 09:00 ~ 13:30 完整時間軸並嚴格對齊 (徹底解決 nan 與空白問題)
     base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
     df_standard = pd.DataFrame({"Time_dt": base_times})
     df_standard["Date"] = selected_date
     df_standard["Time_Str"] = df_standard["Time_dt"].dt.strftime("%H:%M")
 
-    df_day_full = df_raw[df_raw["Date"] == selected_date].copy()
-    if df_day_full.empty:
-        # 若當天無資料則直接用標準時間補一筆預設值避免報錯
-        df_day_full = df_standard.copy()
-        df_day_full["Close"] = 100.0
-        df_day_full["Open"] = 100.0
-        df_day_full["High"] = 100.0
-        df_day_full["Low"] = 100.0
-        df_day_full["Volume"] = 0
-
-    df_day_full = df_day_full.set_index("Time_dt")
-    df_day = df_standard.set_index("Time_dt")
-    df_day["Date"] = selected_date
-    df_day["Time_Str"] = df_day["Time_Str"]
-    df_day["Close"] = df_day_full["Close"] if "Close" in df_day_full.columns else 100.0
-    df_day["Open"] = df_day_full["Open"] if "Open" in df_day_full.columns else 100.0
-    df_day["High"] = df_day_full["High"] if "High" in df_day_full.columns else 100.0
-    df_day["Low"] = df_day_full["Low"] if "Low" in df_day_full.columns else 100.0
-    df_day["Volume"] = df_day_full["Volume"] if "Volume" in df_day_full.columns else 0
+    df_day_raw = df_raw[df_raw["Date"] == selected_date].copy()
     
-    df_day["Close"] = df_day["Close"].ffill().bfill()
-    df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
-    df_day["High"] = df_day["High"].fillna(df_day["Close"])
-    df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
-    df_day["Volume"] = df_day["Volume"].fillna(0)
-    df_day = df_day.reset_index()
+    if df_day_raw.empty:
+        # 若該日無資料，以預設基準價填滿
+        base_price = 100.0
+        df_day = df_standard.copy()
+        df_day["Open"] = base_price
+        df_day["High"] = base_price
+        df_day["Low"] = base_price
+        df_day["Close"] = base_price
+        df_day["Volume"] = 500
+    else:
+        # 使用 merge 確保與標準 09:00-13:30 時間軸完美對齊，避免 NaN
+        df_day = pd.merge(df_standard, df_day_raw[['Time_dt', 'Open', 'High', 'Low', 'Close', 'Volume']], on="Time_dt", how="left")
+        df_day["Date"] = selected_date
+        df_day["Time_Str"] = df_day["Time_dt"].dt.strftime("%H:%M")
+        
+        # 前值補齊與預設值防護
+        df_day["Close"] = df_day["Close"].ffill().bfill().fillna(100.0)
+        df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
+        df_day["High"] = df_day["High"].fillna(df_day["Close"])
+        df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
+        df_day["Volume"] = df_day["Volume"].fillna(500)
 
     total_steps = len(df_day)
     
@@ -255,28 +253,29 @@ def render_daytrade_replay_ui():
     
     st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price:.2f} 元")
     
-    # 左右雙欄同時顯示（左：江波圖，右：分K圖）與下單面板
+    # 左右雙欄同時顯示（左：江波圖 + VWAP均價線，右：分K圖 + EMA）與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
-    # 1. 左側：江波圖（分時走勢圖）
+    # 1. 左側：江波圖（分時走勢圖，內含當日成交均價 VWAP）
     with col_left_chart:
-        st.markdown("#### 🌊 江波圖 (分時走勢)")
+        st.markdown("#### 🌊 江波圖 (分時走勢與當日均價線 VWAP)")
         fig_tick = go.Figure()
         
-        if show_ema and len(df_curr_raw) >= ema_period:
-            df_curr_raw['EMA'] = df_curr_raw['Close'].ewm(span=ema_period, adjust=False).mean()
+        # 計算當日成交均價 VWAP = 累積(成交價 * 成交量) / 累積(成交量)
+        cum_vol = df_curr_raw["Volume"].cumsum()
+        cum_val = (df_curr_raw["Close"] * df_curr_raw["Volume"]).cumsum()
+        df_curr_raw["VWAP"] = np.where(cum_vol > 0, cum_val / cum_vol, df_curr_raw["Close"])
 
         fig_tick.add_trace(go.Scatter(
             x=df_curr_raw["Time_Str"], y=df_curr_raw["Close"],
             mode='lines', name='江波價',
             line=dict(color='#00FFCC', width=2)
         ))
-        if show_ema and 'EMA' in df_curr_raw.columns:
-            fig_tick.add_trace(go.Scatter(
-                x=df_curr_raw["Time_Str"], y=df_curr_raw['EMA'],
-                mode='lines', name=f'EMA {ema_period}',
-                line=dict(color='#FFD700', width=1.5, dash='dot')
-            ))
+        fig_tick.add_trace(go.Scatter(
+            x=df_curr_raw["Time_Str"], y=df_curr_raw["VWAP"],
+            mode='lines', name='當日均價 (VWAP)',
+            line=dict(color='#FFD700', width=1.5, dash='dash')
+        ))
         
         fig_tick.update_layout(
             height=450,
@@ -287,9 +286,9 @@ def render_daytrade_replay_ui():
         )
         st.plotly_chart(fig_tick, use_container_width=True)
 
-    # 2. 右側：多週期分K圖
+    # 2. 右側：多週期分K圖 + EMA
     with col_right_chart:
-        st.markdown(f"#### 📊 {sub_timeframe} K線圖")
+        st.markdown(f"#### 📊 {sub_timeframe} K線圖與指數均線 (EMA)")
         df_sub_resampled = resample_candles(df_curr_raw, sub_timeframe)
         
         fig_k = go.Figure()
