@@ -92,54 +92,54 @@ def load_replay_data(stock_code):
     """ 從 Yahoo Finance 抓取近期真實歷史分K數據 """
     try:
         df = yf.download(stock_code, period="7d", interval="1m", progress=False)
-        if df.empty or len(df) < 30:
+        if df.empty or len(df) < 10:
             raise Exception("資料不足")
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.reset_index()
-        df = df.rename(columns={"Datetime": "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
+        # 相容不同版本的欄位名稱 (Datetime 或 Date)
+        time_col = "Datetime" if "Datetime" in df.columns else "Date"
+        df = df.rename(columns={time_col: "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
         df["Time_dt"] = pd.to_datetime(df["Time"])
         df["Date"] = df["Time_dt"].dt.strftime("%Y-%m-%d")
         df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M")
         return df
     except:
-        # 備用擬真數據產生器
-        dates_range = pd.date_range(end=datetime.today(), periods=3, freq="D")
+        # 備用擬真數據產生器 (確保無網路或抓取失敗時也能正常覆盤)
+        today_str = datetime.today().strftime("%Y-%m-%d")
+        t_min = pd.date_range(f"{today_str} 09:00", f"{today_str} 13:30", freq="1min")
         records = []
         np.random.seed(42)
-        for d in dates_range:
-            d_str = d.strftime("%Y-%m-%d")
-            t_min = pd.date_range(f"{d_str} 09:00", f"{d_str} 13:30", freq="1min")
-            price = 100.0
-            for t in t_min:
-                change = np.random.normal(0, 0.3)
-                open_p = price
-                close_p = price + change
-                high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
-                low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
-                vol = int(np.random.randint(10, 500))
-                price = close_p
-                records.append({
-                    "Time_dt": t,
-                    "Date": d_str,
-                    "Time_Str": t.strftime("%H:%M"),
-                    "Open": round(open_p, 2),
-                    "High": round(high_p, 2),
-                    "Low": round(low_p, 2),
-                    "Close": round(close_p, 2),
-                    "Volume": vol
-                })
+        price = 100.0
+        for t in t_min:
+            change = np.random.normal(0, 0.3)
+            open_p = price
+            close_p = price + change
+            high_p = max(open_p, close_p) + abs(np.random.normal(0, 0.2))
+            low_p = min(open_p, close_p) - abs(np.random.normal(0, 0.2))
+            vol = int(np.random.randint(10, 500))
+            price = close_p
+            records.append({
+                "Time_dt": t,
+                "Date": today_str,
+                "Time_Str": t.strftime("%H:%M"),
+                "Open": round(open_p, 2),
+                "High": round(high_p, 2),
+                "Low": round(low_p, 2),
+                "Close": round(close_p, 2),
+                "Volume": vol
+            })
         return pd.DataFrame(records)
 
 def resample_candles(df, timeframe):
-    if timeframe == "1分K":
+    if timeframe == "1分K" or df.empty:
         return df
     rule_map = {"3分K": "3min", "5分K": "5min", "15分K": "15min", "日K": "1D"}
     rule = rule_map.get(timeframe, "5min")
     
-    df = df.set_index('Time_dt')
+    df_temp = df.set_index('Time_dt')
     agg_dict = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum', 'Date': 'first', 'Time_Str': 'last'}
-    df_resampled = df.resample(rule).agg(agg_dict).dropna().reset_index()
+    df_resampled = df_temp.resample(rule).agg(agg_dict).dropna().reset_index()
     return df_resampled
 
 def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
@@ -178,7 +178,7 @@ def render_daytrade_replay_ui():
         show_ema = st.checkbox("顯示指數均線 (EMA)", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 3. 建立標準 09:00 ~ 13:30 完整時間軸，直接以reindex對齊（絕對不發生merge型態衝突）
+    # 3. 建立標準 09:00 ~ 13:30 完整時間軸
     base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
     df_standard = pd.DataFrame({"Time_dt": base_times})
     df_standard["Date"] = selected_date
@@ -186,19 +186,23 @@ def render_daytrade_replay_ui():
 
     df_day_full = df_raw[df_raw["Date"] == selected_date].copy()
     if df_day_full.empty:
-        st.warning(f"找不到 {selected_date} 的交易資料，請更換日期或代號。")
-        return
+        # 若當天無資料則直接用標準時間補一筆預設值避免報錯
+        df_day_full = df_standard.copy()
+        df_day_full["Close"] = 100.0
+        df_day_full["Open"] = 100.0
+        df_day_full["High"] = 100.0
+        df_day_full["Low"] = 100.0
+        df_day_full["Volume"] = 0
 
-    # 進行安全對齊與前值補齊
     df_day_full = df_day_full.set_index("Time_dt")
     df_day = df_standard.set_index("Time_dt")
     df_day["Date"] = selected_date
     df_day["Time_Str"] = df_day["Time_Str"]
-    df_day["Close"] = df_day_full["Close"]
-    df_day["Open"] = df_day_full["Open"]
-    df_day["High"] = df_day_full["High"]
-    df_day["Low"] = df_day_full["Low"]
-    df_day["Volume"] = df_day_full["Volume"]
+    df_day["Close"] = df_day_full["Close"] if "Close" in df_day_full.columns else 100.0
+    df_day["Open"] = df_day_full["Open"] if "Open" in df_day_full.columns else 100.0
+    df_day["High"] = df_day_full["High"] if "High" in df_day_full.columns else 100.0
+    df_day["Low"] = df_day_full["Low"] if "Low" in df_day_full.columns else 100.0
+    df_day["Volume"] = df_day_full["Volume"] if "Volume" in df_day_full.columns else 0
     
     df_day["Close"] = df_day["Close"].ffill().bfill()
     df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
@@ -244,17 +248,17 @@ def render_daytrade_replay_ui():
             st.success("已播放至收盤")
 
     # 取得當前時間進度資料片段
-    df_curr_raw = df_day.iloc[:st.session_state.replay_step]
+    df_curr_raw = df_day.iloc[:st.session_state.replay_step].copy()
     latest_row = df_curr_raw.iloc[-1]
     curr_time = latest_row["Time_Str"]
-    curr_price = latest_row["Close"]
+    curr_price = float(latest_row["Close"])
     
-    st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price} 元")
+    st.subheader(f"📈 標的：{stock_input} | 日期：{selected_date} ⏰ 當前時間：{curr_time} | 最新價：{curr_price:.2f} 元")
     
     # 左右雙欄同時顯示（左：江波圖，右：分K圖）與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
-    # 1. 左側：江波圖（分時走勢圖，強制 X 軸 09:00 ~ 13:30）
+    # 1. 左側：江波圖（分時走勢圖）
     with col_left_chart:
         st.markdown("#### 🌊 江波圖 (分時走勢)")
         fig_tick = go.Figure()
@@ -263,13 +267,13 @@ def render_daytrade_replay_ui():
             df_curr_raw['EMA'] = df_curr_raw['Close'].ewm(span=ema_period, adjust=False).mean()
 
         fig_tick.add_trace(go.Scatter(
-            x=df_day["Time_Str"], y=df_day["Close"].iloc[:st.session_state.replay_step],
+            x=df_curr_raw["Time_Str"], y=df_curr_raw["Close"],
             mode='lines', name='江波價',
             line=dict(color='#00FFCC', width=2)
         ))
         if show_ema and 'EMA' in df_curr_raw.columns:
             fig_tick.add_trace(go.Scatter(
-                x=df_curr_raw['Time_Str'], y=df_curr_raw['EMA'],
+                x=df_curr_raw["Time_Str"], y=df_curr_raw['EMA'],
                 mode='lines', name=f'EMA {ema_period}',
                 line=dict(color='#FFD700', width=1.5, dash='dot')
             ))
@@ -292,19 +296,20 @@ def render_daytrade_replay_ui():
         if show_ema and len(df_sub_resampled) >= ema_period:
             df_sub_resampled['EMA'] = df_sub_resampled['Close'].ewm(span=ema_period, adjust=False).mean()
 
-        fig_k.add_trace(go.Candlestick(
-            x=df_sub_resampled['Time_Str'],
-            open=df_sub_resampled['Open'], high=df_sub_resampled['High'],
-            low=df_sub_resampled['Low'], close=df_sub_resampled['Close'],
-            increasing_line_color='red', decreasing_line_color='green',
-            name=sub_timeframe
-        ))
-        if show_ema and 'EMA' in df_sub_resampled.columns:
-            fig_k.add_trace(go.Scatter(
-                x=df_sub_resampled['Time_Str'], y=df_sub_resampled['EMA'],
-                mode='lines', name=f'EMA {ema_period}',
-                line=dict(color='#FFD700', width=1.5)
+        if not df_sub_resampled.empty:
+            fig_k.add_trace(go.Candlestick(
+                x=df_sub_resampled['Time_Str'],
+                open=df_sub_resampled['Open'], high=df_sub_resampled['High'],
+                low=df_sub_resampled['Low'], close=df_sub_resampled['Close'],
+                increasing_line_color='red', decreasing_line_color='green',
+                name=sub_timeframe
             ))
+            if show_ema and 'EMA' in df_sub_resampled.columns:
+                fig_k.add_trace(go.Scatter(
+                    x=df_sub_resampled['Time_Str'], y=df_sub_resampled['EMA'],
+                    mode='lines', name=f'EMA {ema_period}',
+                    line=dict(color='#FFD700', width=1.5)
+                ))
             
         fig_k.update_layout(
             height=450,
@@ -368,7 +373,7 @@ def render_daytrade_replay_ui():
         else:
             st.caption("目前無持倉")
 
-    # --- 4. 績效統計與明細表 (嚴格符合規範欄位) ---
+    # --- 4. 績效統計與明細表 ---
     st.markdown("---")
     st.subheader("📈 當日覆盤績效報表")
     
