@@ -101,18 +101,18 @@ def load_replay_data(stock_code):
         df = df.rename(columns={time_col: "Time", "Open": "Open", "High": "High", "Low": "Low", "Close": "Close", "Volume": "Volume"})
         df["Time_dt"] = pd.to_datetime(df["Time"]).dt.tz_localize(None)
         df["Date"] = df["Time_dt"].dt.strftime("%Y-%m-%d")
-        df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M")
+        df["Time_Str"] = df["Time_dt"].dt.strftime("%H:%M:%S") # 精確到秒/分
         return df[['Time_dt', 'Date', 'Time_Str', 'Open', 'High', 'Low', 'Close', 'Volume']]
     except:
         pass
 
-    # 備用穩定擬真數據產生器
+    # 備用穩定擬真數據產生器 (精確到每分鐘)
     dates_range = pd.date_range(end=datetime.today(), periods=5, freq="B")
     records = []
     np.random.seed(42)
     for d in dates_range:
         d_str = d.strftime("%Y-%m-%d")
-        t_min = pd.date_range(f"{d_str} 09:00", f"{d_str} 13:30", freq="1min")
+        t_min = pd.date_range(f"{d_str} 09:00:00", f"{d_str} 13:30:00", freq="1min")
         price = 100.0
         for t in t_min:
             change = np.random.normal(0, 0.3)
@@ -125,7 +125,7 @@ def load_replay_data(stock_code):
             records.append({
                 "Time_dt": t,
                 "Date": d_str,
-                "Time_Str": t.strftime("%H:%M"),
+                "Time_Str": t.strftime("%H:%M:%S"),
                 "Open": round(open_p, 2),
                 "High": round(high_p, 2),
                 "Low": round(low_p, 2),
@@ -161,7 +161,7 @@ def calc_daytrade_cost(buy_price, sell_price, qty, side, fee_discount=0.28):
 def render_daytrade_replay_ui():
     init_replay_state()
     st.title("🎯 專業當沖覆盤模擬：江波圖(均價線VWAP)與分K(EMA)雙效同步系統")
-    st.markdown("左側呈現江波圖與當日成交均價(VWAP)，右側呈現多週期分K圖與 EMA 指數均線，圖表嚴格依時間進度同步運行！")
+    st.markdown("嚴格依據時間進度同步跑圖，左側江波圖含當日成交均價(VWAP)，右側分K含 EMA 指數均線，X軸固定 09:00:00 ~ 13:30:00 全天候展開！")
     
     # 1. 抓取資料
     col_s1, col_s2, col_s3, col_s4 = st.columns([2, 2, 2, 2])
@@ -181,37 +181,19 @@ def render_daytrade_replay_ui():
         show_ema = st.checkbox("右側分K顯示 EMA", value=True)
         ema_period = st.number_input("EMA 參數", min_value=1, max_value=60, value=5)
 
-    # 3. 建立標準 09:00 ~ 13:30 完整時間軸
-    base_times = pd.date_range(f"{selected_date} 09:00", f"{selected_date} 13:30", freq="1min")
-    df_day = pd.DataFrame({"Time_dt": base_times})
-    df_day["Date"] = selected_date
-    df_day["Time_Str"] = df_day["Time_dt"].dt.strftime("%H:%M")
+    # 3. 取得該日實際資料
+    df_day = df_raw[df_raw["Date"] == selected_date].copy()
+    if df_day.empty:
+        # 若該日無資料則以 100 元基準產生當日標準分分資料
+        base_times = pd.date_range(f"{selected_date} 09:00:00", f"{selected_date} 13:30:00", freq="1min")
+        df_day = pd.DataFrame({
+            "Time_dt": base_times,
+            "Date": selected_date,
+            "Time_Str": base_times.strftime("%H:%M:%S"),
+            "Open": 100.0, "High": 100.0, "Low": 100.0, "Close": 100.0, "Volume": 500
+        })
 
-    df_day_raw = df_raw[df_raw["Date"] == selected_date].copy()
-    
-    if not df_day_raw.empty:
-        df_day_raw = df_day_raw.set_index("Time_dt")
-        df_day = df_day.set_index("Time_dt")
-        df_day["Close"] = df_day_raw["Close"]
-        df_day["Open"] = df_day_raw["Open"]
-        df_day["High"] = df_day_raw["High"]
-        df_day["Low"] = df_day_raw["Low"]
-        df_day["Volume"] = df_day_raw["Volume"]
-        df_day = df_day.reset_index()
-    else:
-        df_day["Close"] = 100.0
-        df_day["Open"] = 100.0
-        df_day["High"] = 100.0
-        df_day["Low"] = 100.0
-        df_day["Volume"] = 500
-
-    # 前值補齊與預設值防護
-    df_day["Close"] = df_day["Close"].ffill().bfill().fillna(100.0)
-    df_day["Open"] = df_day["Open"].fillna(df_day["Close"])
-    df_day["High"] = df_day["High"].fillna(df_day["Close"])
-    df_day["Low"] = df_day["Low"].fillna(df_day["Close"])
-    df_day["Volume"] = df_day["Volume"].fillna(500)
-
+    df_day = df_day.sort_values("Time_dt").reset_index(drop=True)
     total_steps = len(df_day)
     
     # 控制列
@@ -248,7 +230,7 @@ def render_daytrade_replay_ui():
         else:
             st.success("已播放至收盤")
 
-    # 💡 核心修正：嚴格依據時間進度滑桿截斷資料片段（只顯示到當前進度點，後面尚未發生的時間不畫出來）
+    # 💡 核心關鍵：嚴格依照進度條切片，圖面只會畫到當前時間點！
     df_curr_raw = df_day.iloc[:st.session_state.replay_step].copy()
     latest_row = df_curr_raw.iloc[-1]
     curr_time = latest_row["Time_Str"]
@@ -257,10 +239,8 @@ def render_daytrade_replay_ui():
     curr_low = float(latest_row["Low"])
     curr_close = float(latest_row["Close"])
     
-    # 即時顯示開高低收看板
-    st.markdown(f"""
-    ### 📈 標的：{stock_input} | 日期：{selected_date} | ⏰ 時間：{curr_time}
-    """)
+    # 即時開高低收看板
+    st.markdown(f"### 📈 標的：{stock_input} | 日期：{selected_date} | ⏰ 時間：{curr_time}")
     m_o, m_h, m_l, m_c = st.columns(4)
     m_o.metric("開盤價 (Open)", f"{curr_open:.2f}")
     m_h.metric("最高價 (High)", f"{curr_high:.2f}")
@@ -270,7 +250,7 @@ def render_daytrade_replay_ui():
     # 左右雙欄圖表與下單面板
     col_left_chart, col_right_chart, col_trade = st.columns([1.5, 1.5, 1])
     
-    # 1. 左側：江波圖（嚴格只畫到當前進度，X軸固定 09:00 ~ 13:30）
+    # 1. 左側：江波圖（嚴格隨著進度條逐根長出，X軸固定 09:00:00 ~ 13:30:00）
     with col_left_chart:
         st.markdown("#### 🌊 江波圖 (分時走勢與當日均價線 VWAP)")
         fig_tick = go.Figure()
@@ -293,13 +273,13 @@ def render_daytrade_replay_ui():
         fig_tick.update_layout(
             height=430,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(range=["09:00", "13:30"]), # 💡 嚴格固定整天 X 軸
+            xaxis=dict(range=["09:00:00", "13:30:00"]), # 💡 嚴格固定整天 X 軸範圍
             template="plotly_dark",
             legend=dict(orientation="h", y=1.1)
         )
         st.plotly_chart(fig_tick, use_container_width=True)
 
-    # 2. 右側：多週期分K圖 + EMA（嚴格只畫到當前進度，X軸固定 09:00 ~ 13:30）
+    # 2. 右側：多週期分K圖 + EMA（嚴格隨著進度條逐根長出，X軸固定 09:00:00 ~ 13:30:00）
     with col_right_chart:
         st.markdown(f"#### 📊 {sub_timeframe} K線圖與指數均線 (EMA)")
         df_sub_resampled = resample_candles(df_curr_raw, sub_timeframe)
@@ -326,7 +306,7 @@ def render_daytrade_replay_ui():
         fig_k.update_layout(
             height=430,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis=dict(range=["09:00", "13:30"]), # 💡 嚴格固定整天 X 軸
+            xaxis=dict(range=["09:00:00", "13:30:00"]), # 💡 嚴格固定整天 X 軸範圍
             xaxis_rangeslider_visible=False,
             template="plotly_dark",
             legend=dict(orientation="h", y=1.1)
@@ -369,8 +349,7 @@ def render_daytrade_replay_ui():
             if st.button("空單平倉", use_container_width=True):
                 short_poss = [p for p in st.session_state.positions if p["side"] == "SHORT"]
                 if short_poss:
-                    pos = short_poss[0]
-                    st.session_state.positions.remove(pos)
+                    pos = short_poss.pop(0)
                     pnl, cost = calc_daytrade_cost(pos["price"], curr_close, pos["qty"], "SHORT")
                     st.session_state.trade_history.append({"strategy": "現股做空", "buy_time": curr_time, "sell_time": pos["time"], "buy_price": curr_close, "sell_price": pos["price"], "qty": pos["qty"], "pnl": round(pnl), "cost": round(cost)})
                     st.success(f"空單平倉！損益: {round(pnl)}元")
@@ -386,7 +365,7 @@ def render_daytrade_replay_ui():
         else:
             st.caption("目前無持倉")
 
-    # --- 4. 績效統計與明細表 ---
+    # --- 4. 績效統計與明細表 (嚴格符合規範欄位) ---
     st.markdown("---")
     st.subheader("📈 當日覆盤績效報表")
     
